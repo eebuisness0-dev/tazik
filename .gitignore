@@ -1,0 +1,36 @@
+# Gradle / build outputs
+.gradle/
+build/
+app/build/
+app/.cxx/
+.kotlin/
+
+# Local configuration
+local.properties
+*.jks
+*.keystore
+keystore.properties
+
+# Vendored dependency sources & built deps (restored via scripts/)
+external/deps-build/
+android/deps/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS / session junk
+.DS_Store
+new-session-*.json
+session-*.md
+*.bak
+tk.hack5.treblecheck_5001001_src.tar.gz
+*.log
+
+# Built guest lib output of scripts/build-inferno-android.sh
+# (the APK-packaged copy lives in app/src/main/jniLibs/)
+android/libqemu-aarch64-softmmu.so
+
+# Banner art (kept locally, not used in README)
+/logo.png

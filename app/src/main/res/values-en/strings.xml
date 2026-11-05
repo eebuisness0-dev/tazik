@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Tazik</string>
+    <string name="emulator_notification_channel">Emulation</string>
+    <string name="download_notification_channel">IPSW Download</string>
+    <string name="download_notification_title">Downloading iOS</string>
+    <string name="machine_service_title">Emulated iPhone</string>
+    <string name="machine_service_text">iOS machine is running (T8030)</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_cancel">Cancel</string>
+</resources>
