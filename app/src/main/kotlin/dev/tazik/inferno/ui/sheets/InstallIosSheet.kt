@@ -34,6 +34,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import dev.tazik.inferno.TazikEngine
+import dev.tazik.inferno.data.BuildManifestInfo
+import dev.tazik.inferno.data.DeviceStore
+import dev.tazik.inferno.data.PlistParser
 import dev.tazik.inferno.engine.L
 import dev.tazik.inferno.engine.LogCapture
 import dev.tazik.inferno.engine.RestorePrep
@@ -168,7 +171,7 @@ fun InstallIosSheet(
                         val ticket = ticketUri!!
                         job = scope.launch {
                             failure = runCatching {
-                                prepare(context, ipsw, ticket, sepKey, stage)
+                                prepare(context, device, ipsw, ticket, sepKey, stage)
                             }.exceptionOrNull()?.message ?: ""
                             if (failure == "") stage.value = L("Готово. Дальше — «Восстановление iOS».")
                             job = null
@@ -203,6 +206,7 @@ fun InstallIosSheet(
 /** Копирует SAF-uri в файл движка и запускает подготовку набора. */
 private suspend fun prepare(
     context: android.content.Context,
+    device: dev.tazik.inferno.data.VirtualDevice,
     ipsw: Uri,
     ticket: Uri,
     sepKey: String,
@@ -263,6 +267,33 @@ private suspend fun prepare(
             stage.value = L("Распаковка набора, %d %%", (done * 100).toInt())
         },
     )
+
+    // Карточке устройства нужно знать, что набор готов: без записи билда
+    // кнопка «ЗАПУСТИТЬ» остаётся серой, а строка — «Установить iOS», как
+    // будто установка не кончилась. Версия и билд берутся из BuildManifest
+    // архива, который уже скопирован на место набора.
+    runCatching {
+        java.util.zip.ZipFile(ipswFile).use { zip ->
+            val entry = zip.getEntry("BuildManifest.plist")
+                ?: zip.getEntry("Restore/BuildManifest.plist")
+            val info = entry?.let {
+                PlistParser.parse(zip.getInputStream(it))?.let { parsed -> BuildManifestInfo.from(parsed) }
+            }
+            if (info != null && info.buildId.isNotBlank()) {
+                val store = DeviceStore.get(context)
+                val stored = store.devices.value.firstOrNull { it.id == device.id } ?: device
+                store.put(
+                    stored.copy(
+                        firmwareVersion = info.version,
+                        firmwareBuild = info.buildId,
+                        firmwareFile = ipswFile.name,
+                    )
+                )
+                LogCapture.note(L("Установка: iOS %@ (%@) записана в карточку", info.version, info.buildId))
+            }
+        }
+    }.onFailure { LogCapture.note(L("Установка: билд не распознан — %@", it.message ?: "")) }
+
     "" // без ошибки
 }
 

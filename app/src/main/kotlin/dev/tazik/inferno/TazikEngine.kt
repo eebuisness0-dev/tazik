@@ -1,9 +1,14 @@
 package dev.tazik.inferno
 
 import android.content.Context
+import dev.tazik.inferno.data.BuildManifestInfo
+import dev.tazik.inferno.data.DeviceStore
+import dev.tazik.inferno.data.PlistParser
+import dev.tazik.inferno.engine.L
 import dev.tazik.inferno.engine.LogCapture
 import dev.tazik.inferno.engine.QemuBridge
 import dev.tazik.inferno.engine.RestoreSession
+import dev.tazik.inferno.engine.VMConfig
 import dev.tazik.inferno.engine.VMModel
 import dev.tazik.inferno.service.MachineService
 import kotlinx.coroutines.CoroutineScope
@@ -48,6 +53,39 @@ object TazikEngine {
                 }
             }
         }
+        scope.launch(Dispatchers.IO) { backfillFirmware(app) }
+    }
+
+    /** Карточка устройства может не знать о уже готовом наборе: прежние
+     * сборки не записывали версию после «Установить iOS», и кнопка запуска
+     * оставалась серой, хотя файлы лежали в InfernoData. Лечится по
+     * BuildManifest набора, который подготовка распаковала на место.
+     */
+    private fun backfillFirmware(context: Context) {
+        val manifest = java.io.File(VMConfig.dataDirectory, "Restore/BuildManifest.plist")
+        if (!manifest.isFile) return
+        val info = runCatching {
+            manifest.inputStream().use { PlistParser.parse(it) }
+        }.getOrNull()?.let { BuildManifestInfo.from(it) } ?: return
+        if (info.buildId.isBlank()) return
+
+        val store = DeviceStore.get(context)
+        val localIpsw = VMConfig.dataDirectory
+            .listFiles { f: java.io.File -> f.isFile && f.name.endsWith(".ipsw") }
+            ?.maxByOrNull { it.length() }?.name
+        var changed = false
+        for (device in store.devices.value) {
+            if (device.firmwareBuild.isNotBlank()) continue
+            store.put(
+                device.copy(
+                    firmwareVersion = info.version,
+                    firmwareBuild = info.buildId,
+                    firmwareFile = device.firmwareFile.ifBlank { localIpsw ?: "" },
+                )
+            )
+            changed = true
+        }
+        if (changed) LogCapture.note(L("Карточка: iOS %@ (%@) дописана по набору", info.version, info.buildId))
     }
 
     /** Обычный запуск: установленная система с диска. */
