@@ -23,7 +23,7 @@ for Apple T8030 (iPhone 11).
 
 **Requirements:**
 
-- Android 7.0+ (API 26), Snapdragon 7s Gen 3 or newer recommended
+- Android 13+ , Snapdragon 7s Gen 3 or newer recommended
 - Up to **20 GB** of free storage for the iOS image
 
 ---
