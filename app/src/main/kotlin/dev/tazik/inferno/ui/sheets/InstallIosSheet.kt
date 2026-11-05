@@ -66,6 +66,7 @@ fun InstallIosSheet(
 
     var ipswUri by remember { mutableStateOf<Uri?>(null) }
     var ticketUri by remember { mutableStateOf<Uri?>(null) }
+    var sepRomUri by remember { mutableStateOf<Uri?>(null) }
     var sepKey by remember {
         mutableStateOf(
             // Ключ прошивки SEP этой сборки (14.5 beta 18E5186a, iPhone12,1):
@@ -98,6 +99,15 @@ fun InstallIosSheet(
             } catch (_: SecurityException) {
             }
             ticketUri = uri
+        }
+    }
+    val pickSepRom = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (_: SecurityException) {
+            }
+            sepRomUri = uri
         }
     }
 
@@ -144,6 +154,27 @@ fun InstallIosSheet(
                     }
                 }
             )
+            PixelRow(
+                title = sepRomUri?.lastPathSegment
+                    ?: if (VMConfig.sepROMPresent) "AppleSEPROM-Cebu-B1"
+                    else L("SEP ROM не выбран"),
+                supporting = {
+                    Text(
+                        if (sepRomUri != null || VMConfig.sepROMPresent) L("Дамп SEP ROM на месте")
+                        else L("Обязателен: дамп AppleSEPROM-Cebu-B1 из набора ChefKiss"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                leading = { Icon(Icons.Rounded.Description, contentDescription = null) },
+                trailing = {
+                    FilledTonalButton(enabled = !working, onClick = {
+                        pickSepRom.launch(arrayOf("*/*", "application/octet-stream"))
+                    }) {
+                        Text(L("Выбрать"))
+                    }
+                }
+            )
             OutlinedTextField(
                 value = sepKey,
                 onValueChange = { sepKey = it.filterNot { c -> c.isWhitespace() } },
@@ -165,13 +196,14 @@ fun InstallIosSheet(
                     Text(if (working) L("Отмена (после шага)") else L("Отмена"))
                 }
                 FilledButton(
-                    enabled = !working && ipswUri != null && ticketUri != null,
+                    enabled = !working && ipswUri != null && ticketUri != null &&
+                        (sepRomUri != null || VMConfig.sepROMPresent),
                     onClick = {
                         val ipsw = ipswUri!!
                         val ticket = ticketUri!!
                         job = scope.launch {
                             failure = runCatching {
-                                prepare(context, device, ipsw, ticket, sepKey, stage)
+                                prepare(context, device, ipsw, ticket, sepRomUri, sepKey, stage)
                             }.exceptionOrNull()?.message ?: ""
                             if (failure == "") stage.value = L("Готово. Дальше — «Восстановление iOS».")
                             job = null
@@ -209,6 +241,7 @@ private suspend fun prepare(
     device: dev.tazik.inferno.data.VirtualDevice,
     ipsw: Uri,
     ticket: Uri,
+    sepRom: Uri?,
     sepKey: String,
     stage: MutableStateFlow<String?>,
 ): String = withContext(Dispatchers.IO) {
@@ -251,6 +284,22 @@ private suspend fun prepare(
     // Мелкие файлы — в кэш.
     val ticketFile = copyToCache(context, ticket, "ticket.shsh2")
         ?: return@withContext L("Не читается: тикет")
+
+    // SEP ROM — единственный файл мимо архива: дамп с настоящего устройства.
+    // Через SAF кладётся прямо на место, adb больше не нужен.
+    if (sepRom != null) {
+        stage.value = L("Копирую SEP ROM…")
+        val rom = VMConfig.sepROM
+        try {
+            rom.delete()
+            context.contentResolver.openInputStream(sepRom)?.use { input ->
+                rom.outputStream().use { output -> input.copyTo(output) }
+            } ?: return@withContext L("Не читается: SEP ROM")
+        } catch (t: Throwable) {
+            return@withContext L("SEP ROM не записался: %@", t.message ?: "")
+        }
+        LogCapture.note(L("Подготовка: SEP ROM на месте"))
+    }
 
     stage.value = L("Готовлю набор…")
     LogCapture.note(L("Подготовка: делаю набор"))
