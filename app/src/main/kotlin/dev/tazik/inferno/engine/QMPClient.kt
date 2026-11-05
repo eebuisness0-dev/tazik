@@ -47,6 +47,35 @@ class QMPClient(private val port: Int = 4556) {
         }
     }
 
+    /** QMP stop/cont: пауза без выключения. */
+    fun pause(on: Boolean, completion: (String) -> Unit) {
+        engineThread("inferno.qmp", 256L * 1024) {
+            val sock = Sock()
+            try {
+                val problem = sock.connect(port)
+                if (problem != null) return@engineThread completion(L("Пауза: %@", problem))
+                if (sock.readSome() == null) {
+                    return@engineThread completion(L("Пауза: приветствия от QMP нет"))
+                }
+                val command = if (on) "stop" else "cont"
+                if (!sock.write("{\"execute\":\"qmp_capabilities\"}\n".toByteArray(Charsets.UTF_8)) ||
+                    sock.readSome() == null ||
+                    !sock.write("{\"execute\":\"$command\"}\n".toByteArray(Charsets.UTF_8))
+                ) {
+                    return@engineThread completion(L("Пауза: команда не ушла"))
+                }
+                val reply = sock.readSome()
+                if (reply != null && String(reply, Charsets.UTF_8).contains("error", ignoreCase = true)) {
+                    completion(L("Пауза: QMP ответил ошибкой"))
+                } else {
+                    completion(if (on) L("Машина заморожена: vCPU стоят") else L("Машина продолжает работу"))
+                }
+            } finally {
+                sock.close()
+            }
+        }
+    }
+
     /** Просит машину выключиться.
      *
      * Это единственный безопасный способ её остановить. `quit` разворачивает

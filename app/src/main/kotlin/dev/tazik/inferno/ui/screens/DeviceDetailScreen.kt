@@ -164,7 +164,7 @@ fun DeviceDetailScreen(
 
             Spacer(Modifier.height(24.dp))
             FilledButton(
-                enabled = device.firmwareBuild.isNotBlank() && state != QemuBridge.State.Running,
+                enabled = device.firmwareBuild.isNotBlank(),
                 shape = RoundedCornerShape(50),
                 onClick = {
                     if (device.firmwareBuild.isBlank()) {
@@ -177,7 +177,7 @@ fun DeviceDetailScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 24.dp)
             ) {
-                Text(if (state == QemuBridge.State.Running) L("УЖЕ РАБОТАЕТ") else L("ЗАПУСТИТЬ"))
+                Text(if (state == QemuBridge.State.Running) L("ОТКРЫТЬ") else L("ЗАПУСТИТЬ"))
             }
             if (device.firmwareBuild.isBlank()) {
                 Text(

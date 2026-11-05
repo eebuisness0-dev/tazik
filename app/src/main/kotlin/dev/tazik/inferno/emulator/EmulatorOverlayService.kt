@@ -27,7 +27,9 @@ import dev.tazik.inferno.R
 import dev.tazik.inferno.TazikEngine
 import dev.tazik.inferno.data.DeviceStore
 import dev.tazik.inferno.data.VirtualDevice
+import dev.tazik.inferno.engine.LogCapture
 import dev.tazik.inferno.engine.QemuBridge
+import kotlin.math.abs
 import kotlin.math.min
 import dev.tazik.inferno.engine.L
 
@@ -39,9 +41,13 @@ class EmulatorOverlayService : Service() {
 
     companion object {
         const val EXTRA_DEVICE_ID = "device_id"
+        const val ACTION_STOP = "dev.tazik.inferno.overlay.STOP"
         private const val CHANNEL_ID = "tazik-overlay"
         private const val NOTIF_ID = 2
         private const val SNAP = 24f
+
+        /** Порог перетаскивания окна, px. */
+        private const val DRAG_SLOP = 18f
     }
 
     private lateinit var wm: WindowManager
@@ -51,6 +57,17 @@ class EmulatorOverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // без права поверх окон addView падает — выходим
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            LogCapture.note(L("Окно поверх отклонено: дайте Tazik разрешение «поверх других приложений»"))
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        // «Закрыть» в уведомлении гасит окно.
+        if (intent?.action == ACTION_STOP) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         val deviceId = intent?.getStringExtra(EXTRA_DEVICE_ID)
             ?: DeviceStore.get(this).devices.value.firstOrNull()?.id
             ?: run { stopSelf(); return START_NOT_STICKY }
@@ -63,8 +80,8 @@ class EmulatorOverlayService : Service() {
 
     override fun onDestroy() {
         overlayView?.stop()
+        overlayView?.let { runCatching { wm.removeView(it) } }
         overlayView = null
-        runCatching { wm.removeView(overlayView) }
         super.onDestroy()
     }
 
@@ -77,11 +94,17 @@ class EmulatorOverlayService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val stopPi = PendingIntent.getService(
+            this, 1,
+            Intent(this, EmulatorOverlayService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         val n: Notification = NotificationCompat.Builder(this, channel)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Tazik: Virtual Phone")
             .setContentText(L("Окно iOS поверх приложений"))
             .setContentIntent(pi)
+            .addAction(0, L("Закрыть"), stopPi)
             .setOngoing(true)
             .build()
         startForeground(id, n)
@@ -115,36 +138,61 @@ class EmulatorOverlayService : Service() {
         val view = OverlayPhoneView(this, device)
         overlayView = view
         val lp = layoutParams
-        var downAt = 0L
-        var touchX = 0f
-        var touchY = 0f
+        var downX = 0f
+        var downY = 0f
+        var lastX = 0f
+        var lastY = 0f
+        var dragging = false
         view.setOnTouchListener { v, ev ->
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    downAt = System.currentTimeMillis()
-                    touchX = ev.rawX
-                    touchY = ev.rawY
+                    // крестик — закрыть
+                    if ((v as OverlayPhoneView).isCloseHit(ev.x, ev.y)) {
+                        stopSelf()
+                        return@setOnTouchListener true
+                    }
+                    downX = ev.rawX
+                    downY = ev.rawY
+                    lastX = downX
+                    lastY = downY
+                    dragging = false
+                    // касание — гостю
+                    (v as OverlayPhoneView).press(ev.x, ev.y)
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = ev.rawX - touchX
-                    val dy = ev.rawY - touchY
-                    touchX = ev.rawX
-                    touchY = ev.rawY
-                    wm.updateViewLayout(v, (v.layoutParams as WindowManager.LayoutParams).apply {
-                        x += dx.toInt()
-                        y += dy.toInt()
-                    })
-                }
-                MotionEvent.ACTION_UP -> {
-                    // магнит к краю
-                    val lp2 = v.layoutParams as WindowManager.LayoutParams
-                    val snapX = if (lp2.x < resources.displayMetrics.widthPixels / 2f)
-                        24 else resources.displayMetrics.widthPixels - v.width - 24
-                    if (min(snapX - lp2.x, lp2.x - snapX) < SNAP * 4) {
-                        lp2.x = snapX
-                        runCatching { wm.updateViewLayout(v, lp2) }
+                    if (!dragging && (abs(ev.rawX - downX) > DRAG_SLOP || abs(ev.rawY - downY) > DRAG_SLOP)) {
+                        // увод в сторону — тащим окно
+                        dragging = true
+                        (v as OverlayPhoneView).releaseGuest()
+                    }
+                    if (dragging) {
+                        val dx = ev.rawX - lastX
+                        val dy = ev.rawY - lastY
+                        lastX = ev.rawX
+                        lastY = ev.rawY
+                        wm.updateViewLayout(v, (v.layoutParams as WindowManager.LayoutParams).apply {
+                            x += dx.toInt()
+                            y += dy.toInt()
+                        })
+                    } else {
+                        (v as OverlayPhoneView).dragGuest(ev.x, ev.y)
                     }
                 }
+                MotionEvent.ACTION_UP -> {
+                    if (dragging) {
+                        // магнит к краю
+                        val lp2 = v.layoutParams as WindowManager.LayoutParams
+                        val snapX = if (lp2.x < resources.displayMetrics.widthPixels / 2f)
+                            24 else resources.displayMetrics.widthPixels - v.width - 24
+                        if (min(snapX - lp2.x, lp2.x - snapX) < SNAP * 4) {
+                            lp2.x = snapX
+                            runCatching { wm.updateViewLayout(v, lp2) }
+                        }
+                    } else {
+                        (v as OverlayPhoneView).releaseGuest()
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> (v as OverlayPhoneView).releaseGuest()
             }
             true
         }
@@ -165,11 +213,30 @@ private class OverlayPhoneView(
     }
     private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        color = android.graphics.Color.argb(180, 12, 14, 18)
+        // непрозрачный фон
+        color = android.graphics.Color.argb(255, 12, 14, 18)
+    }
+    private val waitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        textSize = 64f
+        color = android.graphics.Color.argb(255, 210, 214, 220)
+    }
+    private val closeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = android.graphics.Color.argb(230, 70, 74, 82)
+    }
+    private val closePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        textSize = 44f
+        color = android.graphics.Color.WHITE
     }
     private val handler = Handler(Looper.getMainLooper())
     @Volatile private var running = true
-    private var dst = RectF(0f, 0f, 1f, 1f)
+    /** Прямоугольник картинки внутри вида, для пересчёта тача. */
+    val dst = RectF(0f, 0f, 1f, 1f)
+    private var guestDown = false
+    private var lastGuestX = 0f
+    private var lastGuestY = 0f
 
     init {
         layoutParams = ViewGroup.LayoutParams(
@@ -198,8 +265,9 @@ private class OverlayPhoneView(
             val b = TazikEngine.model.picture.image.value
             if (b != null) {
                 layoutImage(b)
-                invalidate()
             }
+            // инвалидируем всегда, чтобы окно не замирало
+            invalidate()
             handler.postDelayed(this, 33)
         }
     }
@@ -211,7 +279,38 @@ private class OverlayPhoneView(
         val scale = min(vw / b.width, vh / b.height)
         val w = b.width * scale
         val h = b.height * scale
-        dst = RectF(0f, 0f, w, h)
+        dst.set(0f, 0f, w, h)
+    }
+
+    fun press(x: Float, y: Float) {
+        guestDown = true
+        lastGuestX = x
+        lastGuestY = y
+        TazikEngine.model.tap(x, y, dst)
+    }
+
+    fun dragGuest(x: Float, y: Float) {
+        if (!guestDown) return
+        lastGuestX = x
+        lastGuestY = y
+        TazikEngine.model.tap(x, y, dst)
+    }
+
+    fun releaseGuest() {
+        if (!guestDown) return
+        guestDown = false
+        TazikEngine.model.release(lastGuestX, lastGuestY, dst)
+    }
+
+    fun isCloseHit(x: Float, y: Float): Boolean {
+        val dx = x - (width - CLOSE_CENTER)
+        val dy = y - CLOSE_CENTER
+        return dx * dx + dy * dy <= CLOSE_HIT * CLOSE_HIT
+    }
+
+    private companion object {
+        private const val CLOSE_CENTER = 34f
+        private const val CLOSE_HIT = 44f
     }
 
     override fun onAttachedToWindow() {
@@ -227,6 +326,8 @@ private class OverlayPhoneView(
     override fun draw(canvas: Canvas) {
         super.draw(canvas)
         canvas.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), 28f, 28f, shadowPaint)
+        canvas.drawCircle(width - CLOSE_CENTER, CLOSE_CENTER, 26f, closeBgPaint)
+        canvas.drawText("✕", width - CLOSE_CENTER, CLOSE_CENTER + 16f, closePaint)
         val b = TazikEngine.model.picture.image.value
         if (b != null && dst.width() > 1f) {
             canvas.save()
@@ -234,7 +335,7 @@ private class OverlayPhoneView(
             canvas.drawBitmap(b, null, dst, paint)
             canvas.restore()
         } else {
-            canvas.drawText("…", width / 2f, height / 2f, borderPaint)
+            canvas.drawText("…", width / 2f, height / 2f + 20f, waitPaint)
         }
         canvas.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), 28f, 28f, borderPaint)
     }

@@ -371,6 +371,13 @@ class VMModel : RestoreHost {
         serial.stop()
     }
 
+    /** QMP stop/cont. */
+    fun freeze(on: Boolean) {
+        if (!isRunning) return
+        LogCapture.note(if (on) L("Заморозка: отправляю QMP stop…") else L("Продолжение: отправляю QMP cont…"))
+        qmp.pause(on) { report -> LogCapture.note(report) }
+    }
+
     // MARK: Сеть
 
     /** Спрашивает у эмулятора, настроил ли гость когда-нибудь свою сторону связи. */

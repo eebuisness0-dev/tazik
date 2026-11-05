@@ -112,16 +112,17 @@ fun LaunchModeSheet(
                         if (state !is QemuBridge.State.Running) {
                             TazikEngine.startMachine(context)
                         }
-                        val intent = Intent(context, EmulatorOverlayService::class.java)
-                            .putExtra(EmulatorOverlayService.EXTRA_DEVICE_ID, device.id)
-                        androidx.core.content.ContextCompat.startForegroundService(context, intent)
                         onDismiss()
+                        context.startActivity(
+                            Intent(context, EmulatorActivity::class.java)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
                     }
                 },
                 leading = { CircleIcon(Icons.Rounded.PhoneAndroid) },
                 title = "Virtual Phone Mode",
-                supporting = { Text(L("Окно поверх других приложений"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) },
-                trailing = { Icon(Icons.Rounded.CropFree, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                supporting = { Text(L("Экран машины внутри Tazik: тулбар, пауза, логи"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                trailing = { Icon(Icons.Rounded.PhoneAndroid, contentDescription = null, modifier = Modifier.size(20.dp)) },
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,

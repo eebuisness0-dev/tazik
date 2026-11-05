@@ -11,15 +11,34 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.PowerSettingsNew
+import androidx.compose.material.icons.rounded.VolumeDown
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
@@ -38,12 +57,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import dev.tazik.inferno.engine.LogCapture
 import dev.tazik.inferno.engine.QemuBridge
 import dev.tazik.inferno.engine.RestoreSession
+import dev.tazik.inferno.engine.VMModel
 import dev.tazik.inferno.ui.theme.TazikTheme
 import kotlin.math.min
 import kotlinx.coroutines.delay
@@ -80,7 +102,8 @@ private fun EmulatorScreen(onExit: () -> Unit) {
     val hasRun by model.hasRun.collectAsState()
     val restoreStage by RestoreSession.shared.stage.collectAsState()
     var menuOpen by remember { mutableStateOf(false) }
-    var taps by remember { mutableStateOf(0) }
+    var logsOpen by remember { mutableStateOf(false) }
+    var frozen by remember { mutableStateOf(false) }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -127,14 +150,69 @@ private fun EmulatorScreen(onExit: () -> Unit) {
             )
         }
 
-        // угловая зона меню: три быстрых тапа
-        Box(
+        // тулбар: кнопки устройства, пауза, логи, выключение
+        Row(
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 6.dp, end = 6.dp)
-                .size(width = 48.dp, height = 36.dp)
-                .clickable { taps++; if (taps >= 3) { taps = 0; menuOpen = true } }
-        )
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row {
+                IconButton(onClick = { model.press(VMModel.HardwareButton.HOME) }) {
+                    Icon(Icons.Rounded.Home, L("Домой"), tint = Color.White)
+                }
+                IconButton(onClick = { model.press(VMModel.HardwareButton.POWER) }) {
+                    Icon(Icons.Rounded.PowerSettingsNew, L("Питание"), tint = Color.White)
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { frozen = !frozen; model.freeze(frozen) }) {
+                    Icon(
+                        if (frozen) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+                        if (frozen) L("Продолжить") else L("Заморозить"),
+                        tint = Color.White,
+                    )
+                }
+                IconButton(onClick = { logsOpen = true }) {
+                    Icon(Icons.Rounded.Description, L("Логи"), tint = Color.White)
+                }
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Rounded.MoreVert, L("Ещё"), tint = Color.White)
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text(L("Громче")) },
+                            onClick = { menuOpen = false; model.press(VMModel.HardwareButton.VOLUME_UP) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(L("Тише")) },
+                            onClick = { menuOpen = false; model.press(VMModel.HardwareButton.VOLUME_DOWN) },
+                        )
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text(if (frozen) L("Продолжить") else L("Заморозить")) },
+                            onClick = { menuOpen = false; frozen = !frozen; model.freeze(frozen) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(L("Логи")) },
+                            onClick = { menuOpen = false; logsOpen = true },
+                        )
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text(L("Завершить работу")) },
+                            onClick = {
+                                menuOpen = false
+                                model.shutdown()
+                            },
+                        )
+                    }
+                }
+            }
+        }
 
         when (val s = state) {
             is QemuBridge.State.Failed -> {
@@ -185,21 +263,23 @@ private fun EmulatorScreen(onExit: () -> Unit) {
             )
         }
 
-        if (menuOpen) {
+        if (logsOpen) {
+            val logs by LogCapture.text.collectAsState()
             AlertDialog(
-                onDismissRequest = { menuOpen = false },
-                title = { Text(L("Меню эмуляции")) },
-                text = { Text(L("Завершить работу виртуальной машины и вернуться в Tazik?")) },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            menuOpen = false
-                            model.shutdown()
-                        }
-                    ) { Text(L("Завершить")) }
+                onDismissRequest = { logsOpen = false },
+                title = { Text(L("Логи")) },
+                text = {
+                    Text(
+                        logs.takeLast(8000).ifBlank { L("Пока пусто") },
+                        modifier = Modifier
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState()),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
                 },
-                dismissButton = {
-                    TextButton(onClick = { menuOpen = false }) { Text(L("Отмена")) }
+                confirmButton = {
+                    TextButton(onClick = { logsOpen = false }) { Text(L("Закрыть")) }
                 },
                 shape = RoundedCornerShape(48.dp)
             )
