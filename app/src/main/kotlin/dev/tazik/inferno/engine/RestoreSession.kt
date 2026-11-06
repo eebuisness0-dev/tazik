@@ -255,7 +255,7 @@ class RestoreSession private constructor() {
                 is Stage.Booting, is Stage.WaitingForDevice -> {}
                 else -> return@Thread
             }
-            if (fullRestarts >= 2) return@Thread
+            if (fullRestarts >= MAX_IN_PROCESS_RESTARTS) return@Thread
             fullRestarts++
             LogCapture.note(
                 L("Рестор: гость не поднялся — перезапускаю машину (%d/2)", fullRestarts),
@@ -323,7 +323,7 @@ class RestoreSession private constructor() {
                  * заливку. Два перезапуска на процесс — дальше честный
                  * отказ: вечный цикл ребутов жжёт батарею и флеш. */
                 val model = host
-                if (model != null && fullRestarts < 2) {
+                if (model != null && fullRestarts < MAX_IN_PROCESS_RESTARTS) {
                     fullRestarts++
                     LogCapture.note(
                         L("Рестор: беседа кончилась нештатно — перезапускаю машину целиком (%d/2)", fullRestarts),
@@ -587,3 +587,11 @@ class RestoreSession private constructor() {
     /** Подделанный тикет AP — тот самый файл, что нужен каждой загрузке потом. */
     val ticket: File get() = File(VMConfig.dataDirectory, "root_ticket.der")
 }
+
+/**
+ * How many times a restore may restart the machine inside the same process.
+ * Zero: QEMU is not re-entrant, and a second qemu_init in a live process can
+ * crash (SIGSEGV in g_hash_table_iter_next under qemu_init, seen on 0.1.2).
+ * Failing cleanly keeps the log; relaunch the app to try again.
+ */
+private const val MAX_IN_PROCESS_RESTARTS = 0
