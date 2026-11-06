@@ -312,6 +312,14 @@ static jboolean bridge_open(JNIEnv *env, jstring lib_path) {
     return JNI_TRUE;
 }
 
+/* второй qemu_init требует свежий образ библиотеки */
+static void bridge_close(void) {
+    if (g_lib) {
+        dlclose(g_lib);
+        g_lib = NULL;
+    }
+}
+
 JNIEXPORT jboolean JNICALL
 Java_dev_tazik_inferno_engine_QemuNative_nativeStart(
         JNIEnv *env, jclass clazz,
@@ -319,6 +327,7 @@ Java_dev_tazik_inferno_engine_QemuNative_nativeStart(
         jboolean attach_display, jstring work_dir, jstring stderr_log) {
 
     if (atomic_load(&g_state) == 1) return JNI_TRUE;
+    if (atomic_load(&g_state) == 2) bridge_close();
 
     if (!bridge_open(env, lib_path)) return JNI_FALSE;
 

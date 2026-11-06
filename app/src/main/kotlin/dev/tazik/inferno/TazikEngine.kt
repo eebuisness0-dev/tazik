@@ -7,6 +7,7 @@ import dev.tazik.inferno.data.PlistParser
 import dev.tazik.inferno.engine.L
 import dev.tazik.inferno.engine.LogCapture
 import dev.tazik.inferno.engine.QemuBridge
+import dev.tazik.inferno.engine.QemuNative
 import dev.tazik.inferno.engine.RestoreSession
 import dev.tazik.inferno.engine.VMConfig
 import dev.tazik.inferno.engine.VMModel
@@ -44,10 +45,9 @@ object TazikEngine {
                         }
                     }
                     is QemuBridge.State.Stopped, is QemuBridge.State.Failed -> {
-                        if (serviceUp) {
-                            serviceUp = false
-                            MachineService.stopForegroundQuiet(app)
-                        }
+                        // Службу гасит её собственный коллектор: stopService
+                        // снаружи при невыполненной обязанности FGS роняет процесс.
+                        serviceUp = false
                     }
                     QemuBridge.State.Idle -> {}
                 }
@@ -88,12 +88,37 @@ object TazikEngine {
         if (changed) LogCapture.note(L("Карточка: iOS %@ (%@) дописана по набору", info.version, info.buildId))
     }
 
-    /** Обычный запуск: установленная система с диска. */
-    fun startMachine(context: Context): Boolean {
+    /** Обычный запуск: установленная система с диска. Null — поехала. */
+    fun startMachine(context: Context): String? {
         val app = context.applicationContext
         MachineService.ensureForeground(app)
-        model.start()
-        return true
+        val why = model.start()
+        if (why != null) {
+            // Отказ до старта машины: уведомление здесь не к чему.
+            MachineService.stopQuiet(app)
+        }
+        return why
+    }
+
+    /** Сводит состояние с нативной правдой, возвращает уведомление. */
+    fun resync(context: Context) {
+        val alive = QemuNative.isRunning
+        QemuBridge.shared.resync(alive)
+        if (alive) MachineService.ensureForeground(context)
+    }
+
+    /** QMP не отвечает: убиваем процесс, приложение перезапускаем будильником. */
+    fun killEmulator(context: Context) {
+        val app = context.applicationContext
+        val pi = android.app.PendingIntent.getActivity(
+            app, 202,
+            android.content.Intent(app, MainActivity::class.java)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        app.getSystemService(android.app.AlarmManager::class.java)
+            ?.set(android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, android.os.SystemClock.elapsedRealtime() + 150, pi)
+        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     /** Восстановление iOS: рестор сам поднимает машину на рамдиске. */

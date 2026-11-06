@@ -70,6 +70,13 @@ class QemuBridge private constructor() {
     fun start(arguments: List<String>) {
         if (_state.value is State.Running) return
 
+        // второй qemu_init невозможен: машина не реентерабельна
+        if (QemuNative.isRunning) {
+            resync(true)
+            return
+        }
+        resync(false)
+
         LogCapture.note(L("Аргументы:\n  ") + arguments.joinToString(" "))
         for ((name, value) in environment) {
             LogCapture.note("$name=$value")
@@ -85,5 +92,18 @@ class QemuBridge private constructor() {
         if (!ok) {
             _state.value = State.Failed(QemuNative.lastError())
         }
+    }
+
+    /** Сводит состояние с нативной правдой. */
+    fun resync(running: Boolean) {
+        val next: State = when {
+            running && _state.value !is State.Running -> State.Running
+            !running && _state.value is State.Running -> State.Stopped(0)
+            else -> return
+        }
+        LogCapture.note(if (running) L("Состояние сведено: машина работает")
+                        else L("Состояние сведено: машина остановлена"))
+        _state.value = next
+        onStateChange?.invoke(next)
     }
 }

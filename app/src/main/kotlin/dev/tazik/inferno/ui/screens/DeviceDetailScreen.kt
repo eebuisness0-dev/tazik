@@ -24,11 +24,14 @@ import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Memory
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Usb
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,6 +43,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +60,8 @@ import dev.tazik.inferno.TazikEngine
 import dev.tazik.inferno.data.DeviceStore
 import dev.tazik.inferno.data.GuestData
 import dev.tazik.inferno.engine.QemuBridge
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import dev.tazik.inferno.ui.components.CircleIcon
 import dev.tazik.inferno.ui.components.PixelGroup
 import dev.tazik.inferno.ui.components.PixelGroupItem
@@ -87,6 +94,10 @@ fun DeviceDetailScreen(
     var launchOpen by remember { mutableStateOf(false) }
     var notReady by remember { mutableStateOf(false) }
     var deleteOpen by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var killAsk by remember { mutableStateOf(false) }
+    var stopNote by remember { mutableStateOf(false) }
+    val detailScope = rememberCoroutineScope()
 
     Scaffold(topBar = {
         TopAppBar(
@@ -99,6 +110,33 @@ fun DeviceDetailScreen(
                 Text(device?.name ?: L("Устройство"), style = MaterialTheme.typography.titleLargeEmphasized)
             },
             actions = {
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Rounded.MoreVert, contentDescription = L("Ещё"))
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text(L("Остановить эмулятор")) },
+                            onClick = {
+                                menuOpen = false
+                                detailScope.launch {
+                                    // сводим состояние, потом стоп
+                                    TazikEngine.resync(context)
+                                    TazikEngine.model.shutdown()
+                                    val deadline = System.currentTimeMillis() + 8000
+                                    while (
+                                        TazikEngine.model.qemuState.value is QemuBridge.State.Running &&
+                                        System.currentTimeMillis() < deadline
+                                    ) {
+                                        delay(200)
+                                    }
+                                    if (TazikEngine.model.qemuState.value is QemuBridge.State.Running) killAsk = true
+                                    else stopNote = true
+                                }
+                            },
+                        )
+                    }
+                }
                 IconButton(onClick = { deleteOpen = true }) {
                     Icon(Icons.Rounded.Delete, contentDescription = L("Удалить"))
                 }
@@ -208,6 +246,28 @@ fun DeviceDetailScreen(
             text = { Text(L("Сначала установите образ iOS: карточка «Установка iOS» на этом экране.")) },
             confirmButton = { TextButton(onClick = { notReady = false }) { Text(L("Ок")) } }
         )
+    }
+    if (killAsk) {
+        AlertDialog(
+            onDismissRequest = { killAsk = false },
+            title = { Text(L("Эмулятор не отвечает")) },
+            text = { Text(L("Мягкое выключение не сработало. Перезапустить приложение? Машина будет остановлена принудительно.")) },
+            confirmButton = {
+                TextButton(onClick = { killAsk = false; TazikEngine.killEmulator(context) }) {
+                    Text(L("Перезапустить"))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { killAsk = false }) { Text(L("Отмена")) }
+            },
+            shape = RoundedCornerShape(48.dp),
+        )
+    }
+    LaunchedEffect(stopNote) {
+        if (stopNote) {
+            android.widget.Toast.makeText(context, L("Эмулятор остановлен"), android.widget.Toast.LENGTH_SHORT).show()
+            stopNote = false
+        }
     }
     if (deleteOpen && device != null) {
         AlertDialog(

@@ -134,7 +134,8 @@ fun InstallIosSheet(
                 leading = { Icon(Icons.Rounded.Description, contentDescription = null) },
                 trailing = {
                     FilledTonalButton(enabled = !working, onClick = {
-                        pickIpsw.launch(arrayOf("application/octet-stream", "application/zip", "application/x-zip-compressed"))
+                        // без фильтра MIME: .ipsw отдаётся без типа
+                        pickIpsw.launch(arrayOf("*/*"))
                     }) {
                         Text(L("Выбрать"))
                     }

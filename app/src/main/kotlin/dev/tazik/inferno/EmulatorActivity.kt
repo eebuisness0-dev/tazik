@@ -24,21 +24,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.MoreVert
-import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.PowerSettingsNew
-import androidx.compose.material.icons.rounded.VolumeDown
-import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
@@ -53,12 +42,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -74,11 +66,13 @@ import dev.tazik.inferno.engine.L
 class EmulatorActivity : ComponentActivity() {
 
     companion object {
+        const val EXTRA_VPM = "virtual_phone"
         fun intent(context: Context): Intent = Intent(context, EmulatorActivity::class.java)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val vpm = intent.getBooleanExtra(EXTRA_VPM, false)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         controller.hide(WindowInsetsCompat.Type.systemBars())
@@ -88,14 +82,14 @@ class EmulatorActivity : ComponentActivity() {
             android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         setContent {
             TazikTheme {
-                EmulatorScreen(onExit = { finish() })
+                EmulatorScreen(vpm, onExit = { finish() })
             }
         }
     }
 }
 
 @Composable
-private fun EmulatorScreen(onExit: () -> Unit) {
+private fun EmulatorScreen(vpm: Boolean, onExit: () -> Unit) {
     val model = remember { TazikEngine.model }
     val image by model.picture.image.collectAsState()
     val state by model.qemuState.collectAsState()
@@ -104,6 +98,7 @@ private fun EmulatorScreen(onExit: () -> Unit) {
     var menuOpen by remember { mutableStateOf(false) }
     var logsOpen by remember { mutableStateOf(false) }
     var frozen by remember { mutableStateOf(false) }
+    var taps by remember { mutableStateOf(0) }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -150,40 +145,27 @@ private fun EmulatorScreen(onExit: () -> Unit) {
             )
         }
 
-        // тулбар: кнопки устройства, пауза, логи, выключение
-        Row(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.55f))
-                .padding(horizontal = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row {
-                IconButton(onClick = { model.press(VMModel.HardwareButton.HOME) }) {
-                    Icon(Icons.Rounded.Home, L("Домой"), tint = Color.White)
-                }
-                IconButton(onClick = { model.press(VMModel.HardwareButton.POWER) }) {
-                    Icon(Icons.Rounded.PowerSettingsNew, L("Питание"), tint = Color.White)
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { frozen = !frozen; model.freeze(frozen) }) {
-                    Icon(
-                        if (frozen) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
-                        if (frozen) L("Продолжить") else L("Заморозить"),
-                        tint = Color.White,
-                    )
-                }
-                IconButton(onClick = { logsOpen = true }) {
-                    Icon(Icons.Rounded.Description, L("Логи"), tint = Color.White)
-                }
+        if (vpm) {
+            // Пилюли поверх экрана, как в режиме правки хом-скрина iOS:
+            // слева меню, справа выход.
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
                 Box {
-                    IconButton(onClick = { menuOpen = true }) {
-                        Icon(Icons.Rounded.MoreVert, L("Ещё"), tint = Color.White)
-                    }
+                    Pill(L("Изменить"), onClick = { menuOpen = true })
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text(L("Домой")) },
+                            onClick = { menuOpen = false; model.press(VMModel.HardwareButton.HOME) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(L("Питание")) },
+                            onClick = { menuOpen = false; model.press(VMModel.HardwareButton.POWER) },
+                        )
                         DropdownMenuItem(
                             text = { Text(L("Громче")) },
                             onClick = { menuOpen = false; model.press(VMModel.HardwareButton.VOLUME_UP) },
@@ -211,7 +193,17 @@ private fun EmulatorScreen(onExit: () -> Unit) {
                         )
                     }
                 }
+                Pill(L("Готово"), onClick = { model.shutdown() })
             }
+        } else {
+            // iPhone Mode: без всяких панелей, меню — три быстрых тапа в углу.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 6.dp, end = 6.dp)
+                    .size(width = 48.dp, height = 36.dp)
+                    .clickable { taps++; if (taps >= 3) { taps = 0; menuOpen = true } }
+            )
         }
 
         when (val s = state) {
@@ -284,7 +276,43 @@ private fun EmulatorScreen(onExit: () -> Unit) {
                 shape = RoundedCornerShape(48.dp)
             )
         }
+
+        if (!vpm && menuOpen) {
+            AlertDialog(
+                onDismissRequest = { menuOpen = false },
+                title = { Text(L("Меню эмуляции")) },
+                text = { Text(L("Завершить работу виртуальной машины и вернуться в Tazik?")) },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            menuOpen = false
+                            model.shutdown()
+                        }
+                    ) { Text(L("Завершить")) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { menuOpen = false }) { Text(L("Отмена")) }
+                },
+                shape = RoundedCornerShape(48.dp)
+            )
+        }
     }
+}
+
+/** Кнопка-пилюля в стиле режима правки хом-скрина iOS. */
+@Composable
+private fun Pill(text: String, onClick: () -> Unit) {
+    Text(
+        text = text,
+        color = Color(0xFF007AFF),
+        fontSize = 15.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.White.copy(alpha = 0.9f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 5.dp),
+    )
 }
 
 /** Полоса хода восстановления внизу экрана — пока рестор идёт. */

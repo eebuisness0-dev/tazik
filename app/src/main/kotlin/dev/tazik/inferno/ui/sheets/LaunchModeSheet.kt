@@ -55,6 +55,29 @@ fun LaunchModeSheet(
     val scope = rememberCoroutineScope()
     val settingsStore = remember { SettingsStore.get(context) }
     var skipNext by remember { androidx.compose.runtime.mutableStateOf(false) }
+    var refuseWhy by remember { mutableStateOf<String?>(null) }
+
+    // без прошивки старт даёт чёрный экран и выход
+    fun launchEmulator(vpm: Boolean) {
+        if (device.firmwareBuild.isBlank()) {
+            refuseWhy = L("Сначала установите iOS: на устройстве нет прошивки")
+            return
+        }
+        val state = TazikEngine.model.qemuState.value
+        if (state !is QemuBridge.State.Running) {
+            val why = TazikEngine.startMachine(context)
+            if (why != null) {
+                refuseWhy = why
+                return
+            }
+        }
+        onDismiss()
+        context.startActivity(
+            Intent(context, EmulatorActivity::class.java)
+                .putExtra(EmulatorActivity.EXTRA_VPM, vpm)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -68,16 +91,7 @@ fun LaunchModeSheet(
                 modifier = Modifier.padding(bottom = 16.dp)
             )
             PixelRow(
-                onClick = {
-                    scope.launch {
-                        val state = TazikEngine.model.qemuState.value
-                        if (state !is QemuBridge.State.Running) {
-                            TazikEngine.startMachine(context)
-                        }
-                        onDismiss()
-                        context.startActivity(Intent(context, EmulatorActivity::class.java))
-                    }
-                },
+                onClick = { launchEmulator(vpm = false) },
                 leading = { CircleIcon(Icons.Rounded.PhoneIphone) },
                 title = "iPhone Mode",
                 supporting = { Text(L("Полноэкранное погружение"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) },
@@ -95,8 +109,11 @@ fun LaunchModeSheet(
                         // Если рестор отказался стартовать (машина занята, нет
                         // набора) — экран эмулятора не открываем: баннер собьёт
                         // с толку, причина уже в логах.
-                        if (RestoreSession.shared.stage.value.isBusy) {
+                        val stage = RestoreSession.shared.stage.value
+                        if (stage.isBusy) {
                             context.startActivity(Intent(context, EmulatorActivity::class.java))
+                        } else if (stage is RestoreSession.Stage.Failed) {
+                            refuseWhy = stage.why
                         }
                     }
                 },
@@ -106,19 +123,7 @@ fun LaunchModeSheet(
                 trailing = { Icon(Icons.Rounded.CropFree, contentDescription = null, modifier = Modifier.size(20.dp)) },
             )
             PixelRow(
-                onClick = {
-                    scope.launch {
-                        val state = TazikEngine.model.qemuState.value
-                        if (state !is QemuBridge.State.Running) {
-                            TazikEngine.startMachine(context)
-                        }
-                        onDismiss()
-                        context.startActivity(
-                            Intent(context, EmulatorActivity::class.java)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    }
-                },
+                onClick = { launchEmulator(vpm = true) },
                 leading = { CircleIcon(Icons.Rounded.PhoneAndroid) },
                 title = "Virtual Phone Mode",
                 supporting = { Text(L("Экран машины внутри Tazik: тулбар, пауза, логи"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) },
@@ -143,5 +148,20 @@ fun LaunchModeSheet(
                 )
             }
         }
+    }
+
+    val why = refuseWhy
+    if (why != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { refuseWhy = null },
+            title = { Text(L("Запустить нельзя")) },
+            text = { Text(why) },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { refuseWhy = null }) {
+                    Text(L("Ок"))
+                }
+            },
+            shape = RoundedCornerShape(48.dp),
+        )
     }
 }

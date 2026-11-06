@@ -250,7 +250,8 @@ class VMModel : RestoreHost {
 
     // MARK: Запуск и останов
 
-    fun start() {
+    /** Null — машина поехала, иначе причина отказа (она же в журнале). */
+    fun start(): String? {
         refreshFiles()
         refreshJIT()
         // Сказано вслух и в журнал. Кнопка в этом случае недоступна, так что
@@ -258,15 +259,17 @@ class VMModel : RestoreHost {
         // отчёта нет ничего вовсе.
         val stillMissing = _missing.value
         if (stillMissing.isNotEmpty()) {
-            LogCapture.note(L("Запуск отменён: не хватает файлов — %@", stillMissing.joinToString(", ")))
-            return
+            val why = L("Не хватает файлов: %@", stillMissing.joinToString(", "))
+            LogCapture.note(L("Запуск отменён: %@", why))
+            return why
         }
         // Пустой диск грузится в ничто и выглядит как повисание. Восстановление
         // заводится наоборот — оно приносит собственный рамдиск, — так что
         // отказ здесь касается только простого запуска.
         if (config.restoreRamdiskPath == null && !VMConfig.systemInstalled) {
-            LogCapture.note(L("Запуск отменён: на диске ещё нет системы — сначала «Восстановление»"))
-            return
+            val why = L("На диске ещё нет системы — сначала «Восстановление»")
+            LogCapture.note(L("Запуск отменён: %@", why))
+            return why
         }
         // Какой ускоритель — сказано раньше всего: под HVF транслятора нет, и
         // отчёт, не называющий свой, — половина отчёта. На Android ускорителя
@@ -276,8 +279,9 @@ class VMModel : RestoreHost {
         // первой же сгенерированной инструкции, что куда труднее прочесть, чем
         // отказ. HVF кода не генерирует, так что память ему не нужна.
         if (!virtualized && !_jit.value.isAvailable) {
-            LogCapture.note(L("Запуск отменён: JIT недоступен."))
-            return
+            val why = L("JIT недоступен.")
+            LogCapture.note(L("Запуск отменён: %@", why))
+            return why
         }
 
         // Встроенный вывод регистрируется в машине в единственный безопасный
@@ -298,6 +302,7 @@ class VMModel : RestoreHost {
         }
         QemuBridge.shared.environment = Settings.emulatorEnvironment
         QemuBridge.shared.start(config.arguments())
+        return null
     }
 
     private fun onQemuState(state: QemuBridge.State) {

@@ -18,6 +18,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.navigationBars
@@ -81,6 +82,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Экран мог умереть, пока машина жила: сводим состояние с нативной
+        // правдой и возвращаем уведомление, пока эмулятор крутится.
+        TazikEngine.resync(this)
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -89,7 +93,39 @@ class MainActivity : ComponentActivity() {
         setContent {
             val settings by remember { SettingsStore.get(this) }.settings.collectAsState(initial = AppSettings())
             TazikTheme(settings = settings) {
+                val nm = androidx.core.app.NotificationManagerCompat.from(this)
+                var notifOff by remember { mutableStateOf(!nm.areNotificationsEnabled()) }
+                val owner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+                androidx.compose.runtime.DisposableEffect(owner) {
+                    val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+                        if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                            notifOff = !nm.areNotificationsEnabled()
+                        }
+                    }
+                    owner.lifecycle.addObserver(obs)
+                    onDispose { owner.lifecycle.removeObserver(obs) }
+                }
                 TazikRoot()
+                if (notifOff) {
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { notifOff = false },
+                        title = { Text(L("Уведомления выключены")) },
+                        text = { Text(L("Без них не видно, что эмулятор работает, и нет кнопки его остановить. Включить уведомления для Tazik?")) },
+                        confirmButton = {
+                            androidx.compose.material3.TextButton(onClick = {
+                                notifOff = false
+                                startActivity(
+                                    android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName),
+                                )
+                            }) { Text(L("Включить")) }
+                        },
+                        dismissButton = {
+                            androidx.compose.material3.TextButton(onClick = { notifOff = false }) { Text(L("Позже")) }
+                        },
+                        shape = RoundedCornerShape(48.dp),
+                    )
+                }
             }
         }
     }
