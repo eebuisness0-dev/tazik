@@ -334,6 +334,18 @@ Java_dev_tazik_inferno_engine_QemuNative_nativeStart(
     if (atomic_load(&g_state) == 1) return JNI_TRUE;
     if (atomic_load(&g_state) == 2) bridge_close();
 
+    /* stderr в лог-файл ДО dlopen: конструкторы библиотеки (rcu) тоже
+     * должны попадать в лог. */
+    if (stderr_log) {
+        const char *text = (*env)->GetStringUTFChars(env, stderr_log, NULL);
+        if (text) {
+            if (!freopen(text, "a", stderr)) {
+                __android_log_print(ANDROID_LOG_WARN, TAG, "stderr → %s не открылся", text);
+            }
+            (*env)->ReleaseStringUTFChars(env, stderr_log, text);
+        }
+    }
+
     if (!bridge_open(env, lib_path)) return JNI_FALSE;
 
     /* Кэш колбэка — глобальная ссылка: поток ниже зовёт её без JNIEnv. */

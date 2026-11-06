@@ -65,7 +65,9 @@ object DER {
             get() {
                 if (tagClass != 0xC0) return null
                 val number = tagNumber
-                if (number > 0xFF_FFFFL) return null
+                // Настоящий fourCC — это всегда 32-битное значение («rosi» =
+                // 0x726F7369): прежний предел 0xFFFFFF отсекал их все.
+                if (number > 0xFFFF_FFFFL) return null
                 val bytes = ByteArray(4) { i -> ((number ushr (8 * (3 - i))) and 0xFF).toByte() }
                 if (bytes.any { (it.toInt() and 0xFF) < 0x20 || (it.toInt() and 0xFF) >= 0x7F }) return null
                 return String(bytes, Charsets.UTF_8)

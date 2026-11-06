@@ -162,7 +162,9 @@ object Ticket {
                 // сказал подписанный тикет: установка, где такой прошивки
                 // никогда нет, о ней и не спрашивает. В iOS 16 нет
                 // SystemVolumeCanonicalMetadata, например.
-                val entry = manifest[key].asDict() ?: continue
+                // BuildManifest называет ключи с префиксом «Ap,» — берём его
+                // фолбэком, иначе msys-дайджест никогда не переписывается.
+                val entry = (manifest[key].asDict() ?: manifest["Ap,$key"].asDict()) ?: continue
                 val digest = entry["Digest"] as? ByteArray ?: continue
                 val value = field("DGST", component) ?: continue
                 value.identifier = byteArrayOf(0x04)
