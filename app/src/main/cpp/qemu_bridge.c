@@ -315,6 +315,11 @@ static jboolean bridge_open(JNIEnv *env, jstring lib_path) {
 /* второй qemu_init требует свежий образ библиотеки */
 static void bridge_close(void) {
     if (g_lib) {
+        /* call_rcu живёт вечно: уцелев под dlclose, он станет вторым
+         * потребителем очереди RCU следующей машины (порча кучи, SEGV). */
+        void (*rcu_stop)(void) = (void (*)(void))dlsym(g_lib, "qemu_rcu_stop");
+        __android_log_print(ANDROID_LOG_INFO, TAG, "bridge_close: rcu_stop=%p", (void*)rcu_stop);
+        if (rcu_stop) rcu_stop();
         dlclose(g_lib);
         g_lib = NULL;
     }
