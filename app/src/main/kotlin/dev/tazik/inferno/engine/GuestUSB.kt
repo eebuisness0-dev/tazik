@@ -445,6 +445,10 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
     private var rxSeq: Int = 0xFFFF
     private var inbound = ByteArray(0)
 
+    /** Номер нашего последнего пакета, принятого гостем (из его заголовков); -1 — ещё не слышали. */
+    @Volatile
+    private var peerRxSeq: Int = -1
+
     private fun handshake() {
         sendMux(Proto.VERSION, header = be32(2) + be32(0) + be32(0))
         val deadline = now() + 10
@@ -511,6 +515,16 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
             if (muxVersion >= 2) {
                 synchronized(sendLock) {
                     recent.add(packet)
+                    // Подтверждённое гостем спереди больше не нужно: окно
+                    // держит только то, что ещё может понадобиться повторить.
+                    val heard = peerRxSeq
+                    if (heard >= 0) {
+                        while (recent.isNotEmpty()) {
+                            val diff = (heard - u16be(recent[0], 12)) and 0xFFFF
+                            if (diff !in 1..0x7FFF) break
+                            recent.removeAt(0)
+                        }
+                    }
                     if (recent.size > recentKept) {
                         repeat(recent.size - recentKept) { recent.removeAt(0) }
                     }
@@ -530,8 +544,14 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
     /**
      * Куда больше, чем вмещает окно устройства: какой бы пакет оно ни
      * потеряло, он точно ещё здесь, когда видно, что канал встал.
+     *
+     * Окно гостя — 16 МБ ≈ 1024 mux-пакета: встал он не на наш пакет, так на
+     * следующий после дыры, и flood убегает вперёд, пока буфер не переполнится.
+     * Ретрансмита у самого mux'а нет — недостающий пакет обязан оставаться
+     * здесь, пока не придёт его подтверждение; 2048 покрывает всё окно с
+     * запасом. Подтверждённое подрезается на каждом добавлении.
      */
-    private val recentKept = 96
+    private val recentKept = 2048
 
     /**
      * Время от времени эмулируемый контроллер отдаёт устройству mux-пакет
@@ -559,8 +579,23 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
 
         sendLock.lock()
         try {
-            LogCapture.note(L("USB гостя: гость молчит — повторяю последние %d пакетов", recent.size))
-            for (packet in recent) {
+            // Повторяем только то, что гость ещё не принял: всё до его
+            // последнего подтверждённого номера он лишь отбросит как дубли.
+            // Если подтверждений не было вовсе, повторяем всё.
+            val heard = peerRxSeq
+            val pending = if (heard < 0) recent else recent.filter { p ->
+                val diff = (u16be(p, 12) - heard) and 0xFFFF
+                diff in 1..0x7FFF
+            }
+            val toSend = if (pending.isEmpty()) recent else pending
+            LogCapture.note(
+                L(
+                    "USB гостя: гость молчит — повторяю %d из %d пакетов (канал %d→%d, передано %d, потверждено %d, эхо %d)",
+                    toSend.size, recent.size, channel.localPort, channel.remotePort,
+                    channel.txSeq, channel.txAcked, peerRxSeq,
+                ),
+            )
+            for (packet in toSend) {
                 bulkOut(packet)
                 if (packet.size % maxPacket == 0) bulkOut(ByteArray(0))
             }
@@ -571,11 +606,13 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
 
     /**
      * Сколько устройство может отказывать пакету, прежде чем канал считается
-     * мёртвым. Раньше пределом были две секунды, и занятый записью
-     * восстановления гость под транслятором их превышал — всё восстановление
-     * умирало с NAK. `writeDeadline` всё ещё ловит по-настоящему застрявшего.
+     * мёртвым. Гость, проверяя принятый образ (checksumChunks) под TCG,
+     * перестаёт читать сокет на десятки минут, оставаясь живым; заблокированный
+     * его mux не шлёт и keepalive'ов. Перезапуск беседы в этом состоянии
+     * бесполезен — новый никто не прочтёт, — поэтому терпим дольше самой
+     * паузы: пятнадцать минут.
      */
-    private val bulkOutPatience = 60.0
+    private val bulkOutPatience = 900.0
 
     /**
      * Один OUT-пакет с повтором на NAK — и между попытками с устройства
@@ -600,6 +637,20 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
                     if (e.kind != FailureKind.NOT_READY) throw e
                     if (now() > deadline) throw e
                     drainIn()
+                    // Здесь сидит тот, кто держит sendLock, — вызовы ретрая
+                    // из write()/pump() до него не доходят. Повторяем сами:
+                    // NAK дольше 3 с при живом канале — обычно затор на
+                    // потерянном пакете. Повтор сам может встать в NAK —
+                    // не вкручиваемся.
+                    if (!resending && now() - lastNaKResend > 3.0) {
+                        lastNaKResend = now()
+                        resending = true
+                        try {
+                            resendUnacked()
+                        } finally {
+                            resending = false
+                        }
+                    }
                     Thread.sleep(1)
                 }
             }
@@ -608,6 +659,33 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
             // восстановлению, и вопрос в том, гость медленный или ушёл.
             val took = now() - started
             if (took > 2) LogCapture.note(L("USB гостя: пакет ждал приёма %.1f с", took))
+        }
+    }
+
+    /** Последний повтор неподтверждённого из NAK-петли bulkOut. */
+    private var lastNaKResend = Double.NEGATIVE_INFINITY
+
+    /** Внутри повтора: его bulkOut сам может встать в NAK — не вкручиваться. */
+    private var resending = false
+
+    /** Повторяет пакеты, которых гость ещё не принял (см. `resendIfStuck`).
+     * Зовётся только из-под уже взятого `sendLock` — блокировка реентерабельная. */
+    private fun resendUnacked() {
+        val heard = peerRxSeq
+        val pending = if (heard < 0) recent.toList() else recent.filter { p ->
+            val diff = (u16be(p, 12) - heard) and 0xFFFF
+            diff in 1..0x7FFF
+        }
+        if (pending.isEmpty()) return
+        LogCapture.note(
+            L(
+                "USB гостя: передача стоит — повторяю %d из %d пакетов (эхо %d, передано %d)",
+                pending.size, recent.size, heard, txSeq,
+            ),
+        )
+        for (p in pending) {
+            bulkOut(p)
+            if (p.size % maxPacket == 0) bulkOut(ByteArray(0))
         }
     }
 
@@ -675,6 +753,8 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
         if (muxVersion >= 2 && raw.size >= 16) {
             // Эхо собственного номера устройства — то, что держит сеанс живым.
             rxSeq = u16be(raw, 12)
+            // Последний наш пакет, который гость принял по порядку.
+            peerRxSeq = u16be(raw, 14)
             headerSize = 16
         }
         return proto to raw.copyOfRange(headerSize, raw.size)
@@ -858,6 +938,12 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
         var at = 0
         val mtu = usbMTU - 16 - 20
         while (at < bytes.size) {
+            /* Гость, потеряв один наш пакет, отбрасывает всё после него и
+             * молчит, продолжая забирать OUT — NAK не будет, окно не
+             * кончится, и до ветки room<=0 дело не дойдёт. Поэтому ретрай
+             * стража зовётся на каждом шаге: его внутренняя отсрочка (3 с)
+             * делает вызов бесплатным, пока подтверждения идут. */
+            resendIfStuck(channel)
             val (inFlight, room, dead) = synchronized(muxLock) {
                 val inflightNow = (channel.txSeq - channel.txAcked) and 0xFFFF_FFFFL
                 Triple(inflightNow.toInt(), channel.peerWindow - inflightNow.toInt(), channel.closed)
@@ -897,7 +983,7 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
     private fun writeDeadline(channel: Channel): Double {
         synchronized(waitedLock) {
             waited[channel.localPort]?.let { return it }
-            val deadline = now() + 120
+            val deadline = now() + 600
             waited[channel.localPort] = deadline
             return deadline
         }
