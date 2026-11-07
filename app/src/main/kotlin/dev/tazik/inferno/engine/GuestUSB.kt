@@ -175,6 +175,23 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
             }
         }
 
+        // Страж IN-канала: USB ведёт хост, и гость не может отдать ни байта,
+        // пока его не спросят. Запись гостя на endpoint 0x81, которую никто не
+        // забрал за его таймаут, роняет сокет («IO timeout for endpoint 81» →
+        // «Socket unexpectedly closed» в ASR). Поэтому, чем бы ни был занят
+        // отправляющий поток, раз в четверть секунды канал опрашивается
+        // отдельно. Прочитанное лишь копится в `inbound`, подтверждений страж
+        // не шлёт — их по-прежнему отправляет тот, кто разбирает пакеты.
+        thread(name = "inferno.usb-inwatch", isDaemon = true) {
+            while (link === accepted) {
+                try {
+                    Thread.sleep(250)
+                    drainIn()
+                } catch (_: Throwable) {
+                }
+            }
+        }
+
         pump()
         deviceReady = false
         onReady?.invoke(false)
