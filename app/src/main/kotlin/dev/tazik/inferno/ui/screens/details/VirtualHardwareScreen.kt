@@ -36,6 +36,7 @@ import dev.tazik.inferno.ui.components.PixelGroup
 import dev.tazik.inferno.ui.components.PixelGroupItem
 import dev.tazik.inferno.ui.components.SectionLabel
 import dev.tazik.inferno.engine.L
+import dev.tazik.inferno.engine.Settings
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,7 +91,13 @@ fun VirtualHardwareScreen(
                 Text(L("ОЗУ гостя: %d ГБ", device.ramGb), style = MaterialTheme.typography.bodyLargeEmphasized)
                 Slider(
                     value = device.ramGb.toFloat(),
-                    onValueChange = { store.put(device.copy(ramGb = it.toInt().coerceIn(2, 12))) },
+                    onValueChange = {
+                        val gb = it.toInt().coerceIn(2, 12)
+                        store.put(device.copy(ramGb = gb))
+                        // Настоящая память машины живёт здесь, а не в устройстве:
+                        // конфиг запуска читает Settings.
+                        Settings.memory = "$gb" + "G"
+                    },
                     valueRange = 2f..12f,
                     steps = 4,
                 )

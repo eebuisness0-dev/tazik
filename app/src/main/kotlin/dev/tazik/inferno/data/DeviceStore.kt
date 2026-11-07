@@ -11,6 +11,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import java.io.File
 import java.util.UUID
 import dev.tazik.inferno.engine.L
+import dev.tazik.inferno.engine.Settings
 
 class DeviceStore private constructor(context: Context) {
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = false }
@@ -62,6 +63,9 @@ class DeviceStore private constructor(context: Context) {
             name = name.ifBlank { "iPhone 11" },
             createdAtEpochMs = System.currentTimeMillis(),
             diskSizeGb = diskSizeGb,
+            // Показывать то, что реально получит машина: конфиг запуска
+            // читает Settings, а не устройство.
+            ramGb = Settings.memory.dropLast(1).toIntOrNull() ?: 4,
         )
         val dir = guestDir(dev)
         dir.mkdirs()

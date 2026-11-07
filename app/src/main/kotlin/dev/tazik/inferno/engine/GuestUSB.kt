@@ -449,6 +449,10 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
     @Volatile
     private var peerRxSeq: Int = -1
 
+    /** Когда эхо последний раз сдвинулось: застывшее эхо — признак стоящего чтения. */
+    @Volatile
+    private var peerRxChangedAt: Double = 0.0
+
     private fun handshake() {
         sendMux(Proto.VERSION, header = be32(2) + be32(0) + be32(0))
         val deadline = now() + 10
@@ -579,26 +583,7 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
 
         sendLock.lock()
         try {
-            // Повторяем только то, что гость ещё не принял: всё до его
-            // последнего подтверждённого номера он лишь отбросит как дубли.
-            // Если подтверждений не было вовсе, повторяем всё.
-            val heard = peerRxSeq
-            val pending = if (heard < 0) recent else recent.filter { p ->
-                val diff = (u16be(p, 12) - heard) and 0xFFFF
-                diff in 1..0x7FFF
-            }
-            val toSend = if (pending.isEmpty()) recent else pending
-            LogCapture.note(
-                L(
-                    "USB гостя: гость молчит — повторяю %d из %d пакетов (канал %d→%d, передано %d, потверждено %d, эхо %d)",
-                    toSend.size, recent.size, channel.localPort, channel.remotePort,
-                    channel.txSeq, channel.txAcked, peerRxSeq,
-                ),
-            )
-            for (packet in toSend) {
-                bulkOut(packet)
-                if (packet.size % maxPacket == 0) bulkOut(ByteArray(0))
-            }
+            resendPending("гость молчит")
         } finally {
             sendLock.unlock()
         }
@@ -671,16 +656,32 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
     /** Повторяет пакеты, которых гость ещё не принял (см. `resendIfStuck`).
      * Зовётся только из-под уже взятого `sendLock` — блокировка реентерабельная. */
     private fun resendUnacked() {
+        resendPending("передача стоит")
+    }
+
+    /**
+     * Повторяет пакеты, которые гость мог не получить.
+     *
+     * Пока эхо движется, повторяется эхо-фильтрованное подмножество: гость
+     * признался, что всё до него принял. Стоит эху замереть на минуту —
+     * повторяется всё окно целиком: счётчик, которым гость ждёт пакеты, не
+     * обязан совпадать с эхом, и отфильтрованное подмножество может не
+     * содержать тот самый недостающий пакет. Дубли безвредны — гость
+     * отбрасывает их как повторы.
+     */
+    private fun resendPending(what: String) {
         val heard = peerRxSeq
-        val pending = if (heard < 0) recent.toList() else recent.filter { p ->
+        val escalate = heard >= 0 && now() - peerRxChangedAt > 60.0
+        val pending = if (heard < 0 || escalate) recent.toList() else recent.filter { p ->
             val diff = (u16be(p, 12) - heard) and 0xFFFF
             diff in 1..0x7FFF
         }
         if (pending.isEmpty()) return
         LogCapture.note(
             L(
-                "USB гостя: передача стоит — повторяю %d из %d пакетов (эхо %d, передано %d)",
-                pending.size, recent.size, heard, txSeq,
+                "USB гостя: %@ — повторяю %d из %d пакетов (эхо %d, передано %d%@)",
+                what, pending.size, recent.size, heard, txSeq,
+                if (escalate) ", всё окно: эхо стоит" else "",
             ),
         )
         for (p in pending) {
@@ -754,7 +755,11 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
             // Эхо собственного номера устройства — то, что держит сеанс живым.
             rxSeq = u16be(raw, 12)
             // Последний наш пакет, который гость принял по порядку.
-            peerRxSeq = u16be(raw, 14)
+            val heard = u16be(raw, 14)
+            if (heard != peerRxSeq) {
+                peerRxSeq = heard
+                peerRxChangedAt = now()
+            }
             headerSize = 16
         }
         return proto to raw.copyOfRange(headerSize, raw.size)
