@@ -829,6 +829,29 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
     private val muxLock = Any()
 
     /**
+     * Снимок состояния mux'а: кто сколько подтвердил, что висит непрочитанным.
+     * Рестор зовёт его в стоянии — там видно, на чьей стороне застряло.
+     */
+    fun describe(): String {
+        synchronized(muxLock) {
+            val lines = mutableListOf(
+                L(
+                    "Состояние: эхо %d (стоит %.0f с), передано %d, не по порядку %d",
+                    peerRxSeq, now() - peerRxChangedAt, txSeq, seqAnomalies.get(),
+                ),
+            )
+            for (c in channels.values.sortedBy { it.localPort }) {
+                lines += L(
+                    "  канал %d→%d%s: передано %d, потверждено %d, окно %d, непрочитано %d б, прогресс %.0f с назад",
+                    c.localPort, c.remotePort, if (c.closed) " закрыт" else "",
+                    c.txSeq, c.txAcked, c.peerWindow, c.inbox.size, now() - c.lastProgress,
+                )
+            }
+            return lines.joinToString("\n")
+        }
+    }
+
+    /**
      * Открывает соединение с портом на госте. Блокируется, пока гость не
      * ответит, — во время восстановления это может быть долго.
      */

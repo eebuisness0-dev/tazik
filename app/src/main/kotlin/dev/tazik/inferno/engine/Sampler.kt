@@ -53,30 +53,15 @@ object Sampler {
             Thread.sleep(1000)
             val after = samples()
 
-            var busiest: Sample? = null
-            var delta = 0.0
-            for (now in after) {
-                val was = before[now.tid] ?: continue
-                val burned = now.cpu - was.cpu
-                if (burned > delta) {
-                    delta = burned
-                    busiest = now
-                }
-            }
-            val target = busiest
-            if (target == null) {
-                completion(L("Пробник: не удалось определить занятый поток"))
-                return@thread
-            }
-
             val lines = mutableListOf(
-                L("Где крутится поток (%d замеров):", 3),
-                                L("  tid %d «%@» — %@, +%.2f с за замер", target.tid, target.name, target.state, delta),
+                L("Где крутится поток (топ-5, замер 1 с):"),
             )
-            if (delta < 0.05) {
-                lines += "  " + L("  адрес не меняется — поток стоит на одной инструкции")
-            } else {
-                lines += "  " + L("  адрес меняется — поток исполняет цикл")
+            val ranked = after.mapNotNull { now ->
+                val was = before[now.tid] ?: return@mapNotNull null
+                Pair(now, now.cpu - was.cpu)
+            }.sortedByDescending { it.second }.take(5)
+            for ((now, burned) in ranked) {
+                lines += L("  tid %d «%@» — %@, +%.2f с за замер", now.tid, now.name, now.state, burned)
             }
             completion(lines.joinToString("\n"))
         }
