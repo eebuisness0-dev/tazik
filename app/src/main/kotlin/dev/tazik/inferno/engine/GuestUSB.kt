@@ -860,6 +860,9 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
         }
     }
 
+    /** Сколько раз входящий payload пришёл не по порядку (в лог идут первые 20). */
+    private val seqAnomalies = java.util.concurrent.atomic.AtomicInteger(0)
+
     /**
      * Читает с устройства и раскладывает пришедшее, возвращаясь сразу после
      * обработки одного пакета.
@@ -914,9 +917,26 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
             }
             if (payload.isNotEmpty()) {
                 synchronized(muxLock) {
-                    channel.txAck = (sequence + payload.size) and 0xFFFF_FFFFL
-                    channel.inbox += payload
-                    channel.lastProgress = now()
+                    // Принимаем только то, что продолжает поток. Повтор уже
+                    // принятого (гость переотправляет по таймеру) раньше
+                    // дописывался в inbox ещё раз и сдвигал рамку plist'ов;
+                    // перекрытие обрезаем, дыру не принимаем — подтверждение
+                    // с прежним номером заставит гостя повторить.
+                    val expected = channel.txAck
+                    val behind = (expected - sequence) and 0xFFFF_FFFFL
+                    if (behind != 0L && seqAnomalies.incrementAndGet() <= 20) {
+                        LogCapture.note("USB гостя: данные не по порядку — ждали $expected, пришло $sequence, байт ${payload.size}")
+                    }
+                    if (behind == 0L) {
+                        channel.txAck = (sequence + payload.size) and 0xFFFF_FFFFL
+                        channel.inbox += payload
+                        channel.lastProgress = now()
+                    } else if (behind < 0x8000_0000L && behind < payload.size) {
+                        val fresh = payload.copyOfRange(behind.toInt(), payload.size)
+                        channel.txAck = (expected + fresh.size) and 0xFFFF_FFFFL
+                        channel.inbox += fresh
+                        channel.lastProgress = now()
+                    }
                 }
                 sendTcp(channel, flags = 0x10)
             }
