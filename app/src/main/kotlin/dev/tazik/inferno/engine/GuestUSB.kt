@@ -795,6 +795,9 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
         }
     }
 
+    /** Сколько раз входящий payload пришёл не по порядку (в лог идут первые 20). */
+    private val seqAnomalies = java.util.concurrent.atomic.AtomicInteger(0)
+
     /** Consecutive empty IN polls, shared by every thread servicing the mux. */
     private val emptyPolls = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -876,6 +879,9 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
                     // с прежним номером заставит гостя повторить.
                     val expected = channel.txAck
                     val behind = (expected - sequence) and 0xFFFF_FFFFL
+                    if (behind != 0L && seqAnomalies.incrementAndGet() <= 20) {
+                        LogCapture.note("USB гостя: данные не по порядку — ждали $expected, пришло $sequence, байт ${payload.size}")
+                    }
                     if (behind == 0L) {
                         channel.txAck = (sequence + payload.size) and 0xFFFF_FFFFL
                         channel.inbox += payload

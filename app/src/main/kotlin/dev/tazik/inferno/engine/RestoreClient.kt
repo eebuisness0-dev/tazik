@@ -591,6 +591,22 @@ class RestoreClient(
 
             note(L("Рестор: образ проверен, отдаю"))
             file.seek(offset)
+            // Диагностика целостности: хэш того, что реально читается из .ipsw,
+            // против Digest образа в манифесте. Совпало — файл цел, и порча,
+            // если она есть, случилась в USB; нет — битый сам архив.
+            val manifestDigest = (identity.dict("Manifest")?.get("OS").asDict()?.get("Digest")) as? ByteArray
+            val algorithm = when (manifestDigest?.size) {
+                20 -> "SHA-1"
+                32 -> "SHA-256"
+                48 -> "SHA-384"
+                else -> null
+            }
+            val hasher = algorithm?.let { MessageDigest.getInstance(it) }
+            note(
+                "ASR диагностика: checksumChunks=${asr.checksumChunks}, длина=$length, " +
+                    "смещение в архиве=$offset, дайджест в манифесте=" +
+                    (algorithm?.let { "$it ${manifestDigest!!.joinToString("") { b -> "%02x".format(b) }}" } ?: "нет"),
+            )
             // Long, не Int: образ — гигабайты, и Int заворачивается на 2 ГБ
             // (run57: прогресс уходил в −31,8 % ровно на этой отметке).
             var sent = 0L
@@ -599,6 +615,7 @@ class RestoreClient(
                     val size = minOf(131072L, length - sent).toInt()
                     var chunk = ByteArray(size)
                     file.readFully(chunk)
+                    hasher?.update(chunk)
                     if (asr.checksumChunks) chunk += sha1(chunk)
                     channel.write(chunk)
                     sent += size
@@ -617,6 +634,16 @@ class RestoreClient(
                 note(L("Рестор: гость закрыл канал данных на %d из %d МБ — фаза отдачи окончена, жду его вердикта", sent / 1048576, length / 1048576))
             }
             note(L("Рестор: образ системы отдан целиком"))
+            if (hasher != null && sent == length) {
+                val got = hasher.digest()
+                val same = manifestDigest != null && got.contentEquals(manifestDigest)
+                note(
+                    "ASR диагностика: хэш отданного $algorithm=" + got.joinToString("") { b -> "%02x".format(b) } +
+                        if (same) " — СОВПАЛ с манифестом, архив цел" else " — НЕ СОВПАЛ с манифестом (или нет дайджеста)",
+                )
+            } else {
+                note("ASR диагностика: отдано $sent из $length байт, хэш не сверен")
+            }
         } finally {
             try {
                 file.close()
