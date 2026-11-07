@@ -681,15 +681,27 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
             val diff = (u16be(p, 12) - heard) and 0xFFFF
             diff in 1..0x7FFF
         }
-        if (pending.isEmpty()) return
+        // Хвост (то, чего гость ещё не получил) — вперёд: при эскалации
+        // дубликаты из начала окна съедают живое чтение гостя, и недостающий
+        // кадр всегда остаётся последним — наедине с опустевшим переносом
+        // (дедлок на одном кадре: гость ждёт N, а доезжают только N-5..N-1).
+        val ordered = if (heard >= 0) {
+            val (tail, old) = pending.partition { p ->
+                ((u16be(p, 12) - heard) and 0xFFFF) in 1..0x7FFF
+            }
+            tail + old
+        } else {
+            pending
+        }
+        if (ordered.isEmpty()) return
         LogCapture.note(
             L(
                 "USB гостя: %@ — повторяю %d из %d пакетов (эхо %d, передано %d%@)",
-                what, pending.size, recent.size, heard, txSeq,
+                what, ordered.size, recent.size, heard, txSeq,
                 if (escalate) ", всё окно: эхо стоит" else "",
             ),
         )
-        for (p in pending) {
+        for (p in ordered) {
             if (!tryOnce(p)) return
             if (p.size % maxPacket == 0) tryOnce(ByteArray(0))
         }
