@@ -668,6 +668,11 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
      * обязан совпадать с эхом, и отфильтрованное подмножество может не
      * содержать тот самый недостающий пакет. Дубли безвредны — гость
      * отбрасывает их как повторы.
+     *
+     * Проход неблокирующий: стоящий гость отказывает всему, и застревать в
+     * NAK-петле на первом же пакете — значит заморозить сам повтор. Первый
+     * отказ кончает проход; зовущий повторит его через свои три секунды,
+     * когда и эскалация переоценится.
      */
     private fun resendPending(what: String) {
         val heard = peerRxSeq
@@ -685,8 +690,19 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
             ),
         )
         for (p in pending) {
-            bulkOut(p)
-            if (p.size % maxPacket == 0) bulkOut(ByteArray(0))
+            if (!tryOnce(p)) return
+            if (p.size % maxPacket == 0) tryOnce(ByteArray(0))
+        }
+    }
+
+    /** Одна попытка OUT без ожиданий: истина — устройство взяло пакет. */
+    private fun tryOnce(packet: ByteArray): Boolean {
+        return try {
+            transfer(Token.TOKEN_OUT, endpoint = endpointOut, data = packet, retries = 1, delay = 0.0)
+            true
+        } catch (e: Failure) {
+            if (e.kind != FailureKind.NOT_READY) throw e
+            false
         }
     }
 

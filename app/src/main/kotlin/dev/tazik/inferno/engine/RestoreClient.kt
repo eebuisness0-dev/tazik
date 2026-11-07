@@ -86,6 +86,9 @@ class RestoreClient(
                 val quiet = System.currentTimeMillis() / 1000 - lastActivity.get()
                 if (quiet >= 60) {
                     note(L("Рестор: тишина %d с — фаза без процентов, ждём", quiet))
+                    // Кто именно занят в стоянии: крутится транслятор, стоит
+                    // поток устройства или висит диск — решающая разница.
+                    if (quiet >= 120) Sampler.report { note(it) }
                 }
             }
         }
