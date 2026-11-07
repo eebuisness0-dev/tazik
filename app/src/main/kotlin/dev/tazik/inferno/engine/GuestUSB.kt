@@ -445,6 +445,10 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
     private var rxSeq: Int = 0xFFFF
     private var inbound = ByteArray(0)
 
+    /** Номер нашего последнего пакета, принятого гостем (из его заголовков); -1 — ещё не слышали. */
+    @Volatile
+    private var peerRxSeq: Int = -1
+
     private fun handshake() {
         sendMux(Proto.VERSION, header = be32(2) + be32(0) + be32(0))
         val deadline = now() + 10
@@ -559,8 +563,17 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
 
         sendLock.lock()
         try {
-            LogCapture.note(L("USB гостя: гость молчит — повторяю последние %d пакетов", recent.size))
-            for (packet in recent) {
+            // Повторяем только то, что гость ещё не принял: всё до его
+            // последнего подтверждённого номера он лишь отбросит как дубли.
+            // Если подтверждения не было или после него ничего нет — как раньше, всё.
+            val heard = peerRxSeq
+            val pending = if (heard < 0) recent else recent.filter { p ->
+                val diff = (u16be(p, 12) - heard) and 0xFFFF
+                diff in 1..0x7FFF
+            }
+            val toSend = if (pending.isEmpty()) recent else pending
+            LogCapture.note(L("USB гостя: гость молчит — повторяю %d из %d пакетов", toSend.size, recent.size))
+            for (packet in toSend) {
                 bulkOut(packet)
                 if (packet.size % maxPacket == 0) bulkOut(ByteArray(0))
             }
@@ -675,6 +688,8 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
         if (muxVersion >= 2 && raw.size >= 16) {
             // Эхо собственного номера устройства — то, что держит сеанс живым.
             rxSeq = u16be(raw, 12)
+            // Последний наш пакет, который гость принял по порядку.
+            peerRxSeq = u16be(raw, 14)
             headerSize = 16
         }
         return proto to raw.copyOfRange(headerSize, raw.size)
