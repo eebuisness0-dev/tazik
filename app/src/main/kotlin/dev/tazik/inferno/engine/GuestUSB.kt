@@ -780,6 +780,9 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
         }
     }
 
+    /** Consecutive empty IN polls, shared by every thread servicing the mux. */
+    private val emptyPolls = java.util.concurrent.atomic.AtomicInteger(0)
+
     /**
      * Читает с устройства и раскладывает пришедшее, возвращаясь сразу после
      * обработки одного пакета.
@@ -799,9 +802,26 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
             // `muxd.py`, и здесь она ничего не стоит.
             val packet = readMux()
             if (packet == null) {
-                Thread.sleep(1)
+                // Idle polls back off (1 -> 2 -> 4 ms). Every poll is a round
+                // trip into QEMU's USB device model, and at 1 ms the pump and
+                // the writer together made hundreds of thousands of NAKed
+                // polls per restore, competing with the guest's vCPUs for
+                // CPU time and the emulator lock. A partly received packet
+                // keeps the fast cadence so it completes promptly.
+                val misses = if (inbound.isEmpty()) emptyPolls.incrementAndGet() else {
+                    emptyPolls.set(0)
+                    0
+                }
+                Thread.sleep(
+                    when {
+                        misses < 50 -> 1L
+                        misses < 200 -> 2L
+                        else -> 4L
+                    },
+                )
                 continue
             }
+            emptyPolls.set(0)
             val (proto, body) = packet
             if (proto != Proto.TCP.value || body.size < 20) continue
             val destination = u16be(body, 2)
