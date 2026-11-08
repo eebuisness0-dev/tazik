@@ -238,29 +238,29 @@ class RestoreSession private constructor() {
          * холодных страницах и свопе идёт медленно, сторожевой пёс гостя
          * стреляет, а сам гость перезагрузиться не может — путь ресета
          * SMC/PMU в форке не дописан. Тёплый бут после такого всегда
-         * чистый, так что не ждём, когда машина «вернётся», — гасим и
-         * поднимаем заново сами. Живому буту хватает двух минут, Ready и
-         * Restoring снимают сторож. */
+         * чистый, так что не ждём, когда машина «вернётся», — гасим процесс
+         * целиком, и рестор продолжается сам. */
         Thread {
-            val deadline = System.nanoTime() / 1_000_000_000 + 300
-            while (System.nanoTime() / 1_000_000_000 < deadline) {
+            val startedAt = android.os.SystemClock.elapsedRealtime()
+            var noted = 0L
+            while (android.os.SystemClock.elapsedRealtime() < startedAt + 300_000) {
                 when (stage.value) {
                     is Stage.Booting, is Stage.WaitingForDevice -> {}
                     else -> return@Thread
                 }
+                val waited = (android.os.SystemClock.elapsedRealtime() - startedAt) / 1000
+                if (waited >= noted + 60) {
+                    noted = waited / 60 * 60
+                    LogCapture.note(L("Рестор: гость молчит %d с — жду бута", noted))
+                }
                 Thread.sleep(5000)
             }
-            val toRestart = host ?: return@Thread
+            if (host == null) return@Thread
             when (stage.value) {
                 is Stage.Booting, is Stage.WaitingForDevice -> {}
                 else -> return@Thread
             }
-            if (fullRestarts >= 2) return@Thread
-            fullRestarts++
-            LogCapture.note(
-                L("Рестор: гость не поднялся — перезапускаю машину (%d/2)", fullRestarts),
-            )
-            restartMachineWhole(toRestart)
+            restartViaProcess(L("гость не поднялся"))
         }.apply { isDaemon = true; start() }
     }
 
@@ -268,6 +268,9 @@ class RestoreSession private constructor() {
         usb?.stop()
         usb = null
         host = null
+        // Человек оборвал рестор: подхват не возобновлять, бюджет — с нуля.
+        Prefs.setFlag("restore.resume", false)
+        Prefs.setNumber("restore.restarts", 0)
         set(Stage.Idle)
     }
 
@@ -414,8 +417,33 @@ class RestoreSession private constructor() {
         // эмулятор держит сброс, о котором попросил гость. Это то окно, в
         // котором патчит наш демон.
         waitForPatcher()
-        host?.shutdownMachine()
         set(Stage.Done)
+        // Прогон кончил сам — подхват больше не начинать, бюджет новых сессий с нуля.
+        Prefs.setFlag("restore.resume", false)
+        Prefs.setNumber("restore.restarts", 0)
+        // Штатная смерть QEMU в уборке роняла процесс (worker-тред прыгает
+        // в чужую память: 14e, 14g и оба вылета 14i). Данные уже на диске —
+        // гасим процесс целиком, будильник вернёт человека в приложение.
+        Thread.sleep(5000)
+        ProcessRestart.killAndReopen(203)
+    }
+
+    /** Вместо нового подъёма машины в живом процессе — смерть всему
+     * процессу: будильник вернёт приложение, а сессия сама доклеит
+     * рестора. Тёплый первый бут нового процесса чистый — весь
+     * in-process подход этого не получал никогда. */
+    private fun restartViaProcess(why: String) {
+        val count = Prefs.number("restore.restarts", 0).toInt()
+        if (count >= 2) {
+            Prefs.setFlag("restore.resume", false)
+            LogCapture.note(L("Рестор: %@ — два тихих подхвата не помогли, отдаюсь", why))
+            set(Stage.Failed(L("%@", why)))
+            return
+        }
+        Prefs.setNumber("restore.restarts", (count + 1).toLong())
+        Prefs.setFlag("restore.resume", true)
+        LogCapture.note(L("Рестор: %@ — гашу процесс (%d/2), возобновится сам", why, count + 1))
+        ProcessRestart.killAndReopen(204)
     }
 
     /** Ждёт патчера в госте, читая консоль, которую машина и так пишет.

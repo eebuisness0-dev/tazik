@@ -6,6 +6,8 @@ import dev.tazik.inferno.data.DeviceStore
 import dev.tazik.inferno.data.PlistParser
 import dev.tazik.inferno.engine.L
 import dev.tazik.inferno.engine.LogCapture
+import dev.tazik.inferno.engine.Prefs
+import dev.tazik.inferno.engine.ProcessRestart
 import dev.tazik.inferno.engine.QemuBridge
 import dev.tazik.inferno.engine.QemuNative
 import dev.tazik.inferno.engine.RestoreSession
@@ -104,25 +106,29 @@ object TazikEngine {
     fun resync(context: Context) {
         val alive = QemuNative.isRunning
         QemuBridge.shared.resync(alive)
-        if (alive) MachineService.ensureForeground(context)
+        if (alive) {
+            MachineService.ensureForeground(context)
+            return
+        }
+        // Процесс умер посреди рестора (сброс после паники бута и родня):
+        // будильник вернул приложение — сессия доклеивается сама.
+        if (Prefs.flag("restore.resume")) {
+            Prefs.setFlag("restore.resume", false)
+            LogCapture.note(L("Рестор: процесс поднят заново — продолжаю (попытка %d)", Prefs.number("restore.restarts", 0)))
+            MachineService.ensureForeground(context)
+            RestoreSession.shared.start(model)
+        }
     }
 
     /** QMP не отвечает: убиваем процесс, приложение перезапускаем будильником. */
     fun killEmulator(context: Context) {
-        val app = context.applicationContext
-        val pi = android.app.PendingIntent.getActivity(
-            app, 202,
-            android.content.Intent(app, MainActivity::class.java)
-                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP),
-            android.app.PendingIntent.FLAG_IMMUTABLE,
-        )
-        app.getSystemService(android.app.AlarmManager::class.java)
-            ?.set(android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, android.os.SystemClock.elapsedRealtime() + 150, pi)
-        android.os.Process.killProcess(android.os.Process.myPid())
+        ProcessRestart.killAndReopen(202)
     }
 
     /** Восстановление iOS: рестор сам поднимает машину на рамдиске. */
     fun startRestore(context: Context) {
+        // Новый прогон, который начал человек: бюджет тихих подхватов — весь.
+        Prefs.setNumber("restore.restarts", 0)
         val app = context.applicationContext
         MachineService.ensureForeground(app)
         RestoreSession.shared.start(model)
