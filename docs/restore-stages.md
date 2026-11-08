@@ -64,3 +64,29 @@ QEMU уже умирает по QMP quit: `qemu_cleanup`/RCU/тред-пул в 
 - CPU гостя: 100–200 % = жив/пашет; единицы = мёртв; D-нити = блок на диске.
 - Пульс `тишина N с` — фаза без процентов (норма для этапов 5, 8, 10).
 - Патience канала 900 с (bulkOutPatience): при истечении — разрыв → RestoreSession заново → emptyTheDisk → полная перезаливка.
+
+## Порт ChefKiss (ветка chefkiss-port у inferno-makrsas, коммит 07.11)
+
+Дословно их подходы из живого `https://git.chefkiss.dev/AppleHax/Inferno.git` (то же
+болячки у них — те же лекарства):
+
+1. **_heap tagging off** в `qemu_init` (`disable_android_heap_tagging`, dlopen libc +
+   mallopt/android_mallopt на уровне NONE) — у нас в томбстоунах класса 3 стоял
+   `PR_TAGGED_ADDR_ENABLE`.
+2. **PAC-безопасный setjmp** (`util/setjmp-aarch64/` + `-Dsigsetjmp=inferno_sigsetjmp`
+   и `siglongjmp` в meson для android+aarch64; работает и для `.S`). Бионьевский
+   longjmp правит битами PAC адрес возврата — pc=lr в анонимной памяти, как в наших
+   14e/14g/14i.
+3. **dwc3 td_fetch: проверка HWO ДО классификации TRBCTL** (их 7e18da720f) —
+   незаряженный TRB нестандартного типа больше не маскируется «unsupported TRBCTL».
+4. **SMC 'rest': всегда reset** (как у них, строка smc.c:229) вместо
+   «holding, as told»; держание сбросов снято и у Apple-wdt. Иволюшка: окно патчера
+   Tazik держалось на hold-reset=on — теперь гость сам ребутается и в окне патчера.
+
+## Сторож бута: смерть процесса вместо живого перезапуска
+
+Дедлайн 300 с на `elapsedRealtime`, пульс в лог каждые 60 с. По истечению —
+`restartViaProcess`: флажок `restore.resume` + счётчик `restore.restarts` (≤2) +
+`ProcessRestart.killAndReopen(204)`; приложение возвращается будильником, и
+`TazikEngine.resync` сам продолжает рестор. Счётчик обнуляется в `Done`, `stop`
+и новом ручном «Восстановление».
