@@ -31,6 +31,7 @@ tk.hack5.treblecheck_5001001_src.tar.gz
 # Built guest lib output of scripts/build-inferno-android.sh
 # (the APK-packaged copy lives in app/src/main/jniLibs/)
 android/libqemu-aarch64-softmmu.so
+android/symbols/
 
 # Banner art (kept locally, not used in README)
 /logo.png
