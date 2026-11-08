@@ -612,11 +612,13 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
      */
     private fun bulkOut(packet: ByteArray) {
         val started = now()
+        currentOut = packet
         try {
             val deadline = started + bulkOutPatience
             while (true) {
                 try {
                     transfer(Token.TOKEN_OUT, endpoint = endpointOut, data = packet, retries = 1, delay = 0.0)
+                    currentOut = null
                     return
                 } catch (e: Failure) {
                     if (e.kind != FailureKind.NOT_READY) throw e
@@ -640,6 +642,7 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
                 }
             }
         } finally {
+            currentOut = null
             // Сказано вслух: долгий отказ — то, что предшествует мёртвому
             // восстановлению, и вопрос в том, гость медленный или ушёл.
             val took = now() - started
@@ -658,6 +661,9 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
     private fun resendUnacked() {
         resendPending("передача стоит")
     }
+
+    /** Пакет, который прямо сейчас крутится в NAK-пете bulkOut; под sendLock. */
+    private var currentOut: ByteArray? = null
 
     /**
      * Повторяет пакеты, которые гость мог не получить.
@@ -689,9 +695,17 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
             val (tail, old) = pending.partition { p ->
                 ((u16be(p, 12) - heard) and 0xFFFF) in 1..0x7FFF
             }
-            tail + old
+            (tail + old).toMutableList()
         } else {
-            pending
+            pending.toMutableList()
+        }
+        // Кадр, крутящийся в NAK-пете bulkOut, в recent не попадает (он ещё
+        // не ушёл), а гость может ждать только его — «дедлок на одном
+        // кадре»: ждут N, доезжают N-5..N-1.
+        val cur = currentOut
+        if (cur != null && ordered.none { it.contentEquals(cur) }) {
+            val alive = heard < 0 || ((u16be(cur, 12) - heard) and 0xFFFF) in 1..0x7FFF
+            if (alive) ordered.add(cur)
         }
         if (ordered.isEmpty()) return
         LogCapture.note(
@@ -701,9 +715,16 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
                 if (escalate) ", всё окно: эхо стоит" else "",
             ),
         )
+        // Первый NAK — не конец прохода: недостающий кадр обычно в хвосте,
+        // и NAK одного пакета не значит NAK остальных. Гасим проход двойным
+        // NAK подряд: кольцо пусто и дальше будет так же.
+        var nakStreak = 0
         for (p in ordered) {
-            if (!tryOnce(p)) return
-            if (p.size % maxPacket == 0) tryOnce(ByteArray(0))
+            val ok = tryOnce(p)
+            LogCapture.note("USB гостя: повтор ${u16be(p, 12)} → ${if (ok) "ушёл" else "NAK"}")
+            nakStreak = if (ok) 0 else nakStreak + 1
+            if (nakStreak >= 2) break
+            if (ok && p.size % maxPacket == 0) tryOnce(ByteArray(0))
         }
     }
 
@@ -932,72 +953,110 @@ class GuestUSB(private val socketName: String = VMConfig.usbSocketName) {
     private fun serviceMux(timeout: Double) {
         val deadline = now() + timeout
         do {
-            // Пустое чтение — обычный ответ на тихом канале, и немедленный
-            // повтор превращает это в верчение, отбирающее канал у того, кто
-            // действительно передаёт. Миллисекунда терпения — то, что ждёт
-            // `muxd.py`, и здесь она ничего не стоит.
-            val packet = readMux()
-            if (packet == null) {
+            // Приём и разбор одного mux-пакета — под единым recvLock, разбор
+            // внутри него. Раньше второй поток (писатель канала, pump)
+            // успевал вклиниться между пакетами одной пары гостя и обрабатывать
+            // их в обратном порядке: средний кадр терялся, наш открытый ack
+            // уезжал за потерянные байты, и гость навсегда ждал ответа
+            // («ждали 10746, пришло 10750» у copy_restore_sep — тихий
+            // дедлок restaura).
+            var empty = true
+            var handled = false
+            var replyFlags = -1                    // -1: нечего слать; ≥0: флаги ответа
+            var replyChannel: Channel? = null
+            recvLock.lock()
+            try {
+                var t = takeMux()
+                if (t == null) {
+                    val chunk = try {
+                        transfer(Token.TOKEN_IN, endpoint = endpointIn, length = usbMTU, retries = 1, delay = 0.0)
+                    } catch (e: Failure) {
+                        if (e.kind != FailureKind.NOT_READY) throw e
+                        null
+                    }
+                    if (chunk != null && chunk.isNotEmpty()) inbound += chunk
+                    t = takeMux()
+                }
+                if (t != null) {
+                    empty = false
+                    val (proto, body) = t
+                    if (proto == Proto.TCP.value && body.size >= 20) {
+                        val destination = u16be(body, 2)
+                        val sequence = u32be(body, 4)
+                        val acknowledged = u32be(body, 8)
+                        val flags = body[13].toInt() and 0xFF
+                        val payload = body.copyOfRange(20, body.size)
+                        val channel = synchronized(muxLock) { channels[destination] } ?: continue
+                        handled = true
+                        // Все решения в одном lock: сдвиг txAck, приём
+                        // payload'а и журнал атомарны относительно потока
+                        // соседа — иначе он вклинивается между приёмом и
+                        // обработкой, и кадр теряется.
+                        synchronized(muxLock) {
+                            val before = channel.txAcked
+                            channel.peerWindow = u16be(body, 14) shl 8
+                            if (flags and 0x10 != 0) {
+                                if (acknowledged != channel.txAcked) channel.lastProgress = now()
+                                channel.txAcked = acknowledged
+                            }
+                            LogCapture.note(
+                                "USB гостя: in ch$destination txn=$sequence ack=$acknowledged (было $before) окно=${channel.peerWindow} " +
+                                    "флаги=$flags байт=${payload.size} эхо=$peerRxSeq",
+                            )
+                            if (flags and 0x04 != 0) { // RST
+                                channel.closed = true
+                                channels.remove(destination)
+                                replyChannel = null
+                            }
+                            if (flags and 0x02 != 0 && flags and 0x10 != 0) { // SYN|ACK
+                                channel.txAck = (sequence + 1) and 0xFFFF_FFFFL
+                                replyFlags = 0x10
+                            } else {
+                                if (payload.isNotEmpty()) {
+                                    // Принимаем только то, что продолжает поток. Повтор уже
+                                    // принятого (гость переотправляет по таймеру) раньше
+                                    // дописывался в inbox ещё раз и сдвигал рамку plist'ов;
+                                    // перекрытие обрезаем, дыру не принимаем — подтверждение
+                                    // с прежним номером заставит гостя повторить.
+                                    val expected = channel.txAck
+                                    val behind = (expected - sequence) and 0xFFFF_FFFFL
+                                    if (behind != 0L && seqAnomalies.incrementAndGet() <= 20) {
+                                        LogCapture.note("USB гостя: данные не по порядку — ждали $expected, пришло $sequence, байт ${payload.size}")
+                                    }
+                                    if (behind == 0L) {
+                                        channel.txAck = (sequence + payload.size) and 0xFFFF_FFFFL
+                                        channel.inbox += payload
+                                        channel.lastProgress = now()
+                                    } else if (behind < 0x8000_0000L && behind < payload.size) {
+                                        val fresh = payload.copyOfRange(behind.toInt(), payload.size)
+                                        channel.txAck = (expected + fresh.size) and 0xFFFF_FFFFL
+                                        channel.inbox += fresh
+                                        channel.lastProgress = now()
+                                    }
+                                }
+                                if (payload.isNotEmpty()) replyFlags = 0x10
+                                if (flags and 0x01 != 0) { // FIN
+                                    channel.closed = true
+                                }
+                            }
+                            replyChannel = channel
+                        }
+                    }
+                }
+            } finally {
+                recvLock.unlock()
+            }
+            if (!handled) {
+                // Пустое чтение — обычный ответ на тихом канале, и немедленный
+                // повтор превращает это в верчение, отбирающее канал у того,
+                // кто действительно передаёт. Миллисекунда терпения — то, что
+                // ждёт `muxd.py`, и здесь она ничего не стоит.
                 Thread.sleep(1)
                 continue
             }
-            val (proto, body) = packet
-            if (proto != Proto.TCP.value || body.size < 20) continue
-            val destination = u16be(body, 2)
-            val sequence = u32be(body, 4)
-            val acknowledged = u32be(body, 8)
-            val flags = body[13].toInt() and 0xFF
-            val payload = body.copyOfRange(20, body.size)
-
-            val channel = synchronized(muxLock) { channels[destination] } ?: continue
-
-            if (flags and 0x04 != 0) { // RST
-                synchronized(muxLock) {
-                    channel.closed = true
-                    channels.remove(destination)
-                }
-                continue
-            }
-            synchronized(muxLock) {
-                channel.peerWindow = u16be(body, 14) shl 8
-                if (flags and 0x10 != 0) {
-                    if (acknowledged != channel.txAcked) channel.lastProgress = now()
-                    channel.txAcked = acknowledged
-                }
-            }
-
-            if (flags and 0x02 != 0 && flags and 0x10 != 0) { // SYN|ACK
-                synchronized(muxLock) { channel.txAck = (sequence + 1) and 0xFFFF_FFFFL }
-                sendTcp(channel, flags = 0x10)
-                continue
-            }
-            if (payload.isNotEmpty()) {
-                synchronized(muxLock) {
-                    // Принимаем только то, что продолжает поток. Повтор уже
-                    // принятого (гость переотправляет по таймеру) раньше
-                    // дописывался в inbox ещё раз и сдвигал рамку plist'ов;
-                    // перекрытие обрезаем, дыру не принимаем — подтверждение
-                    // с прежним номером заставит гостя повторить.
-                    val expected = channel.txAck
-                    val behind = (expected - sequence) and 0xFFFF_FFFFL
-                    if (behind != 0L && seqAnomalies.incrementAndGet() <= 20) {
-                        LogCapture.note("USB гостя: данные не по порядку — ждали $expected, пришло $sequence, байт ${payload.size}")
-                    }
-                    if (behind == 0L) {
-                        channel.txAck = (sequence + payload.size) and 0xFFFF_FFFFL
-                        channel.inbox += payload
-                        channel.lastProgress = now()
-                    } else if (behind < 0x8000_0000L && behind < payload.size) {
-                        val fresh = payload.copyOfRange(behind.toInt(), payload.size)
-                        channel.txAck = (expected + fresh.size) and 0xFFFF_FFFFL
-                        channel.inbox += fresh
-                        channel.lastProgress = now()
-                    }
-                }
-                sendTcp(channel, flags = 0x10)
-            }
-            if (flags and 0x01 != 0) { // FIN
-                synchronized(muxLock) { channel.closed = true }
+            if (replyFlags >= 0) {
+                val out = replyChannel
+                if (out != null) sendTcp(out, flags = 0x10)
             }
             return
         } while (now() < deadline)

@@ -74,10 +74,6 @@ class RestoreSession private constructor() {
     /** Модель машины, поднявшая этот рестор. */
     private var host: RestoreHost? = null
 
-    /** Сколько раз сессия сама перезапускала машину целиком. Лимит — два:
-     * дальше честный отказ, вечный цикл ребутов жжёт батарею и флеш. */
-    private var fullRestarts = 0
-
     private fun set(stage: Stage) {
         _stage.value = stage
         if (stage is Stage.Failed) {
@@ -274,21 +270,6 @@ class RestoreSession private constructor() {
         set(Stage.Idle)
     }
 
-    /** Полный перезапуск машины в ходе рестора: гасим, ждём смерти,
-     * поднимаем заново. Единственное лекарство от трупа гостя (restored
-     * уже ответил своей ошибкой) и от паники холодного бута. */
-    private fun restartMachineWhole(model: RestoreHost) {
-        model.shutdownMachine()
-        var waited = 0
-        while (model.machineRunning && waited < 20) {
-            Thread.sleep(1000)
-            waited++
-        }
-        stop()
-        Thread.sleep(5000)
-        start(model)
-    }
-
     /** Открывает канал к `restored` и спрашивает, кто он, — тот же QueryType,
      * с которого начинается всякий инструмент libimobiledevice.
      */
@@ -322,19 +303,11 @@ class RestoreSession private constructor() {
                  * ещё жив (утренний прогон отошёл на попытке 2), но не труп:
                  * если гость успел ответить своей ошибкой (14, 6 — run60,
                  * run62), новая беседа бьётся в мёртвого и сессия падает.
-                 * Перезапуск машины целиком даёт чистого гостя и чистую
-                 * заливку. Два перезапуска на процесс — дальше честный
-                 * отказ: вечный цикл ребутов жжёт батарею и флеш. */
-                val model = host
-                if (model != null && fullRestarts < 2) {
-                    fullRestarts++
-                    LogCapture.note(
-                        L("Рестор: беседа кончилась нештатно — перезапускаю машину целиком (%d/2)", fullRestarts),
-                    )
-                    restartMachineWhole(model)
-                } else {
-                    set(Stage.Failed(e.message ?: L("ошибка")))
-                }
+                 * Смерть процесса даёт чистого гостя и чистую заливку — даже
+                 * полный перезапуск QEMU в живом процессе фатален (worker
+                 * block-IO прыгает в чужую память, вылет 15:03). Две смерти —
+                 * дальше честный отказ: вечный цикл ребутов жжёт батарею. */
+                restartViaProcess(L("беседа кончилась нештатно"))
             }
         }
     }
